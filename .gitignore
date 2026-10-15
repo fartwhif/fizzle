@@ -1,0 +1,5 @@
+/target
+
+# Raw decompiled retail client dumps (kept on disk, excluded from VCS)
+docs/artifacts/acclient.c
+docs/artifacts/acclient.h

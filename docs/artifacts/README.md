@@ -1,0 +1,1 @@
+This folder contains artifacts from the retail game

@@ -1,0 +1,7 @@
+[package]
+name = "acproto"
+description = "Asheron's Call wire protocol: packets, crypto, message codecs, character-gen data"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
