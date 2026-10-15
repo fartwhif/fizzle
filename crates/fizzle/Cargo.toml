@@ -1,5 +1,5 @@
 [package]
-name = "acetui"
+name = "fizzle"
 description = "Rust TUI client for ACE (Asheron's Call) servers"
 version.workspace = true
 edition.workspace = true

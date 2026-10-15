@@ -1723,3 +1723,32 @@ Client mapping (see AC-UI.md "Combat (TUI)"): a hit → a chat line
 <name>`; a kill → the death text verbatim. `UpdateHealth` folds the
 fraction into the appraise vitals cache (`health = round(fraction ×
 healthMax)`) that drives the status bar's `%H` readout.
+
+### 25.4 Death & respawn (verified against the live server)
+
+Unlike the combat events above, death is signalled by two **top-level**
+GameMessages (not the §7 `0xF7B0` GameEvent wrapper), both captured
+byte-for-byte from the live server log and covered by the `acproto` capture
+regression tests:
+
+| Opc    | Message                          | Payload |
+| ------ | -------------------------------- | ------- |
+| `0x019E` | `PlayerKilled`                | `String16L message, u32 victim, u32 killer` — broadcast when a player dies, to nearby players **including the victim themselves**; e.g. `+TuiHero's perforated corpse falls before Black Bunny!` |
+| `0x02E9` | `PrivateUpdateAttribute2ndLevel` | `u8 seq, u32 vital, u32 value` — server-authoritative self vitals. `vital`: `2` Health / `4` Stamina / `6` Mana; `value` = **absolute** points; `seq` = per-vital counter |
+
+The server's death sequence (`Player_Death.cs` `Die()` +
+`ThreadSafeTeleportOnDeath()`): a `Motion(Dead)` broadcast, `0x02E9
+Health=0`, `0x02CD` NumDeaths, the `0x02C2` vitae-penalty enchant, corpse
+creation (a new `512` "Corpse of <name>" weenie), a `ThreadSafeTeleport` to
+the sanctuary/lifestone, and ~3 s later `0x02E9` restoring Health/Stamina/Mana
+to `round(0.75 × max)` — and to **full** at the lifestone.
+
+Client mapping: `Health == 0` (0x02E9) sets the dead state — a red "YOU ARE
+DEAD" overlay, motion packets stop, input is gated (retail's
+`PlayerIsDead`), and any held key / pending jump is flushed so nothing fires
+on revive. The `PlayerKilled` broadcast is handled retail-faithfully:
+victim==self → dead (message **swallowed**, no chat line); killer==self →
+swallowed (own kills are already covered by the `KillerNotification`);
+otherwise → the message scrolls to chat. The revive vitals (`Health > 0`)
+clear the dead state. The death teleport itself rides the existing
+`PlayerTeleport` (`0xF751`) / `UpdatePosition` (`0xF748`) flow.

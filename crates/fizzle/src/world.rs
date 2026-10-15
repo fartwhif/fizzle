@@ -190,6 +190,22 @@ impl World {
         }
     }
 
+    /// Server-authoritative vitals from `PrivateUpdateAttribute2ndLevel`
+    /// (0x02E9). The server sends `Health = 0` on death and restores 75% of
+    /// max on the death teleport (revive), so both the health bar and the
+    /// dead state follow the server rather than local damage tracking.
+    pub fn set_vital(&mut self, vital: u32, value: u32) {
+        match vital {
+            messages::vital::HEALTH => {
+                self.vitals.health = Some(value);
+                self.dead = value == 0;
+            }
+            messages::vital::STAMINA => self.vitals.stamina = Some(value),
+            messages::vital::MANA => self.vitals.mana = Some(value),
+            _ => {}
+        }
+    }
+
     /// Targets: non-self entities in the same landblock within radar range,
     /// nearest first.
     #[must_use]

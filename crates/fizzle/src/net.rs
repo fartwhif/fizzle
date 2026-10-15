@@ -80,7 +80,7 @@ impl Net {
         let reader = socket.try_clone()?;
         reader.set_read_timeout(Some(std::time::Duration::from_millis(100)))?;
         thread::Builder::new()
-            .name("acetui-net".into())
+            .name("fizzle-net".into())
             .spawn(move || reader_loop(reader, tx, close_rx))?;
         Ok(Self {
             socket,

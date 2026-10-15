@@ -2,24 +2,24 @@
 
 A terminal client for the [ACE](https://asheron.us) (Asheron's Call) server
 protocol, written in Rust. It logs in, enters the world, and supports movement,
-melee combat, chat, a radar, vitals, and target appraisal — verified against a
-live ACE server.
+melee combat, chat, a radar, vitals, target appraisal, death/respawn, and
+logout — verified against a live ACE server.
 
 ## Workspace
 
 | Crate | Purpose |
 |-------|---------|
 | `acproto` | The protocol: packet framing, ISAAC stream crypto, the login/connect handshake, and encode/decode for the S2C/C2S game messages. |
-| `acetui`  | The `ratatui`/`crossterm` terminal UI and session driver on top of `acproto`. |
+| `fizzle`  | The `ratatui`/`crossterm` terminal UI and session driver on top of `acproto`. |
 
-`acproto` is self-contained (no I/O); `acetui` owns the UDP socket, the reader
+`acproto` is self-contained (no I/O); `fizzle` owns the UDP socket, the reader
 thread, input, and rendering.
 
 ## Build & run
 
 ```sh
 cargo build            # dev profile
-cargo run -p acetui -- --account <user> --password <pass>
+cargo run -p fizzle -- --account <user> --password <pass>
 ```
 
 Options:
@@ -34,7 +34,7 @@ Options:
 ```
 
 Profiles (servers + accounts) are persisted under the user config dir, so a
-second run can just `cargo run -p acetui` and reuse the active entry.
+second run can just `cargo run -p fizzle` and reuse the active entry.
 
 ## Controls
 
@@ -73,6 +73,20 @@ An `Echo`/`EchoResponse` keep-alive runs continuously so the server's
 anti-speedhack `VerifyEcho` stays happy and the session isn't dropped for
 inactivity.
 
+## Death & respawn
+
+Death and respawn are server-authoritative, not tracked from local damage.
+The `PlayerKilled` (0x019E) broadcast and the `PrivateUpdateAttribute2ndLevel`
+(0x02E9) vitals drive the client: `Health == 0` sets the dead state (red
+"YOU ARE DEAD" overlay, motion packets stop, input gated as in the retail
+`PlayerIsDead`), and the revive vitals — health restored to 75% of max on the
+death teleport, then to full at the lifestone/sanctuary — clear it. Like the
+retail client, the client swallows its own `PlayerKilled` (no chat line when
+the local player is victim or killer) and scrolls other players' deaths to
+chat. The death teleport itself syncs through the existing
+`PlayerTeleport`/`UpdatePosition` flow. Both opcodes are verified
+byte-for-byte against the live server (capture regression tests in `acproto`).
+
 ## Tests
 
 ```sh
@@ -86,9 +100,5 @@ parsing cleanly instead of panicking the client.
 
 ## Known limitations
 
-- **Death / respawn sync.** The client tracks its own health locally from
-  damage events. If the server kills the character, the client can stay out of
-  sync (still showing alive) until the server logs the session out; death and
-  respawn `GameEvent`s are not yet handled.
 - **Character creation** is implemented and exercised, but long-running
   gameplay features (spells, trading, housing, etc.) are out of scope.

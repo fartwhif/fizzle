@@ -450,6 +450,24 @@ impl App {
             }
             Incoming::VectorUpdate(_) => {}
             Incoming::Motion(_) => {}
+            Incoming::PlayerKilled { message, victim, killer } => {
+                if Some(victim) == self.self_guid {
+                    // Retail swallows its own death message (no death screen);
+                    // the dead state drives the HUD and input gating.
+                    self.world.dead = true;
+                    self.kill_input();
+                } else if Some(killer) != self.self_guid {
+                    // Someone else died nearby (retail scrolls it; our own
+                    // kills are covered by the KillerNotification).
+                    self.world.chat.push("", &message, ChatStyle::System);
+                }
+            }
+            Incoming::VitalUpdate { vital, value } => {
+                if vital == messages::vital::HEALTH && value == 0 && !self.world.dead {
+                    self.kill_input();
+                }
+                self.world.set_vital(vital, value);
+            }
             Incoming::GameEvent(ge) => self.handle_game_event(ge),
             Incoming::TurbineChat(tc) => {
                 if tc.is_ack {
@@ -969,6 +987,14 @@ impl App {
         }
     }
 
+    /// Stop all motion input (retail gates input via `PlayerIsDead`; a key
+    /// still held in `keys_down` would otherwise keep sending motion after we
+    /// die, and a stale jump would fire right after we revive).
+    fn kill_input(&mut self) {
+        self.keys_down.clear();
+        self.pending_jump = false;
+    }
+
     // =================================================================== tick
 
     /// Per-frame step: liveness timers + fixed-cadence movement.
@@ -1030,6 +1056,7 @@ impl App {
         }
         // Movement at a fixed 50 ms cadence.
         if self.phase == Phase::InWorld
+            && !self.world.dead
             && now.duration_since(self.last_tick) >= Duration::from_secs_f32(TICK)
         {
             let mut held = self.held_keys();

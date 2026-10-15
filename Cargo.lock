@@ -3,19 +3,6 @@
 version = 4
 
 [[package]]
-name = "acetui"
-version = "0.1.0"
-dependencies = [
- "acproto",
- "anyhow",
- "clap",
- "crossterm",
- "ratatui",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "acproto"
 version = "0.1.0"
 
@@ -247,6 +234,19 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "fizzle"
+version = "0.1.0"
+dependencies = [
+ "acproto",
+ "anyhow",
+ "clap",
+ "crossterm",
+ "ratatui",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

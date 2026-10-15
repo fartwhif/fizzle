@@ -1,4 +1,4 @@
-//! `acetui` — a terminal TUI client for Asheron's Call (ACE server).
+//! `fizzle` — a terminal TUI client for Asheron's Call (ACE server).
 
 mod app;
 mod movement;
@@ -27,7 +27,7 @@ use net::DEFAULT_GAME_PORT;
 use profiles::Profiles;
 
 #[derive(Parser, Debug)]
-#[command(name = "acetui", version, about = "Terminal TUI client for Asheron's Call (ACE)")]
+#[command(name = "fizzle", version, about = "Terminal TUI client for Asheron's Call (ACE)")]
 struct Cli {
     /// Server host
     #[arg(long, default_value = "127.0.0.1")]

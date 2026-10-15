@@ -41,6 +41,8 @@ pub mod opcode {
     pub const DDD_INTERROGATION: u32 = 0xF7E5;
     pub const HEAR_SPEECH: u32 = 0x02BB;
     pub const EMOTE_TEXT: u32 = 0x01E0;
+    pub const PLAYER_KILLED: u32 = 0x019E;
+    pub const PRIVATE_UPDATE_ATTRIBUTE_2ND_LEVEL: u32 = 0x02E9;
 }
 
 /// `GameActionType` values (C2S actions, wrapped in `GAME_ACTION`).
@@ -124,6 +126,13 @@ pub mod turbine_channel {
     pub const LFG: u32 = 4;
     pub const ROLEPLAY: u32 = 5;
     pub const OLTHOI: u32 = 10;
+}
+
+/// `Vital` ids as written in `PRIVATE_UPDATE_ATTRIBUTE_2ND_LEVEL` (0x02E9).
+pub mod vital {
+    pub const HEALTH: u32 = 2;
+    pub const STAMINA: u32 = 4;
+    pub const MANA: u32 = 6;
 }
 
 // =====================================================================
@@ -576,6 +585,17 @@ pub enum Incoming {
         text: String,
         chat_type: u32,
     },
+    /// `PlayerKilled` (0x019E): broadcast when a player dies, including to self.
+    PlayerKilled {
+        message: String,
+        victim: u32,
+        killer: u32,
+    },
+    /// `PrivateUpdateAttribute2ndLevel` (0x02E9): server-authoritative vitals for self.
+    VitalUpdate {
+        vital: u32,
+        value: u32,
+    },
     /// Anything else (logged and ignored).
     Other(u32),
 }
@@ -632,6 +652,27 @@ pub fn parse_incoming(data: &[u8]) -> Option<Incoming> {
             let text = r.string16l();
             let chat_type = r.u32();
             Some(Incoming::ServerMessage { text, chat_type })
+        }
+        opcode::PLAYER_KILLED => match crate::strings::read_string16l(r.buf, r.pos) {
+            Some((message, pos)) => {
+                r.pos = pos;
+                if r.remaining() < 8 {
+                    return Some(Incoming::Other(op));
+                }
+                let victim = r.u32();
+                let killer = r.u32();
+                Some(Incoming::PlayerKilled { message: message.to_string(), victim, killer })
+            }
+            None => Some(Incoming::Other(op)),
+        },
+        opcode::PRIVATE_UPDATE_ATTRIBUTE_2ND_LEVEL => {
+            if r.remaining() < 9 {
+                return Some(Incoming::Other(op));
+            }
+            r.u8(); // per-vital sequence (ByteSequence)
+            let vital = r.u32();
+            let value = r.u32();
+            Some(Incoming::VitalUpdate { vital, value })
         }
         _ => Some(Incoming::Other(op)),
     }
@@ -1494,5 +1535,124 @@ mod tests {
         write_packed_len(&mut w2, 0x123);
         let mut r2 = Reader::new(&w2.out);
         assert_eq!(read_packed_len(&mut r2), Some(0x123));
+    }
+
+    #[test]
+    fn player_killed_layout() {
+        let mut w = Writer::new();
+        w.u32(opcode::PLAYER_KILLED);
+        w.string16l("+TuiHero was slain by Black Bunny");
+        w.u32(0x5000_01D0); // victim
+        w.u32(0x7860_0001); // killer
+        match parse_incoming(&w.out).expect("parse") {
+            Incoming::PlayerKilled { message, victim, killer } => {
+                assert_eq!(message, "+TuiHero was slain by Black Bunny");
+                assert_eq!(victim, 0x5000_01D0);
+                assert_eq!(killer, 0x7860_0001);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vital_update_layout() {
+        let mut w = Writer::new();
+        w.u32(opcode::PRIVATE_UPDATE_ATTRIBUTE_2ND_LEVEL);
+        w.u8(7); // per-vital sequence
+        w.u32(vital::HEALTH);
+        w.u32(4); // 75% of a max of 5, rounded
+        match parse_incoming(&w.out).expect("parse") {
+            Incoming::VitalUpdate { vital, value } => {
+                assert_eq!(vital, vital::HEALTH);
+                assert_eq!(value, 4);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn player_killed_truncated_does_not_panic() {
+        // The string prefix claims more bytes than are present.
+        let mut d = Vec::new();
+        d.extend_from_slice(&opcode::PLAYER_KILLED.to_le_bytes());
+        d.extend_from_slice(&100u16.to_le_bytes());
+        match parse_incoming(&d) {
+            None | Some(Incoming::Other(0x019E)) => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vital_update_truncated_does_not_panic() {
+        let mut d = Vec::new();
+        d.extend_from_slice(&opcode::PRIVATE_UPDATE_ATTRIBUTE_2ND_LEVEL.to_le_bytes());
+        d.extend_from_slice(&[7u8, 2, 0, 0]); // seq + partial vital
+        match parse_incoming(&d) {
+            None | Some(Incoming::Other(0x02E9)) => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn player_killed_capture() {
+        // Exact 0x019E capture from the live server log: +TuiHero (0x500001D0)
+        // killed by a Black Bunny (0x786020B3) in block 0x8602. Layout:
+        // string16l message, then victim guid, then killer guid.
+        let text = b"+TuiHero's perforated corpse falls before Black Bunny!";
+        assert_eq!(text.len(), 54);
+        let mut msg = vec![
+            0x9E, 0x01, 0x00, 0x00, // opcode PLAYER_KILLED
+            0x36, 0x00, // string16l len 54 (2+54 = 56, already 4-aligned)
+        ];
+        msg.extend_from_slice(text);
+        msg.extend_from_slice(&[
+            0xD0, 0x01, 0x00, 0x50, // victim 0x500001D0 (+TuiHero)
+            0xB3, 0x20, 0x60, 0x78, // killer 0x786020B3 (Black Bunny)
+        ]);
+        assert_eq!(msg.len(), 4 + 2 + 54 + 4 + 4);
+        match parse_incoming(&msg).expect("parse") {
+            Incoming::PlayerKilled { message, victim, killer } => {
+                assert_eq!(
+                    message,
+                    "+TuiHero's perforated corpse falls before Black Bunny!"
+                );
+                assert_eq!(victim, 0x5000_01D0);
+                assert_eq!(killer, 0x7860_20B3);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn vital_update_capture() {
+        // Exact 0x02E9 captures from the live server log, in arrival order:
+        // the death (Health -> 0) and the lifestone revive (Health -> 5)
+        // of the same session. Layout: u8 per-vital seq, u32 vital, u32 value.
+        let death: &[u8] = &[
+            0xE9, 0x02, 0x00, 0x00, // opcode PRIVATE_UPDATE_ATTRIBUTE_2ND_LEVEL
+            0x03, // seq (per-vital counter)
+            0x02, 0x00, 0x00, 0x00, // vital HEALTH
+            0x00, 0x00, 0x00, 0x00, // value 0 (dead)
+        ];
+        match parse_incoming(death).expect("parse") {
+            Incoming::VitalUpdate { vital, value } => {
+                assert_eq!(vital, vital::HEALTH);
+                assert_eq!(value, 0);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        let revive: &[u8] = &[
+            0xE9, 0x02, 0x00, 0x00,
+            0x07, // seq
+            0x02, 0x00, 0x00, 0x00, // vital HEALTH
+            0x05, 0x00, 0x00, 0x00, // value 5 (lifestone full revive)
+        ];
+        match parse_incoming(revive).expect("parse") {
+            Incoming::VitalUpdate { vital, value } => {
+                assert_eq!(vital, vital::HEALTH);
+                assert_eq!(value, 5);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }
