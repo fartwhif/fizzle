@@ -318,7 +318,12 @@ The server matches `cookie + C2S-IP + state==AuthConnectResponse`, sets the S2C 
 * **Packet `Sequence`:** strictly increasing starting at **2** (the server's
   `lastReceivedPacketSequence` starts at 1 and Login/ConnectResponse are seq-0 or
   non-updating, so the first in-order game packet must be `2`; `NetworkSession.cs:57,349-379,487`).
-  Use `2, 3, 4, …`.
+  Use `2, 3, 4, …`. **PAKs (`AckSequence`) never consume a number**: the server does not advance
+  `lastReceivedPacketSequence` for them (`NetworkSession.cs:486-487`) and its duplicate check
+  explicitly accepts `Ack && seq == last` (line 350), so each PAK must **reuse** the current value
+  (the last real packet's sequence; `1` before any real packet). A PAK that consumed a number
+  pushes the next real packet to `seq > last+1`, where it is parked out-of-order and never
+  processed, while the server NAKs the missing gap (`Requested retransmit of N`).
 * **Fragment `Sequence`:** a *global* per-connection counter, strictly increasing, starting at
   **1** (the first fragment processed is the first game packet;
   `lastReceivedFragmentSequence` starts at 0, `NetworkSession.cs:58,551,573`). Use `1, 2, 3, …`
@@ -1003,8 +1008,9 @@ OrientationHasNoW] … ; [i32 animFrame if HasPlacementID] ; [f32×3 velocity if
     consume `Ack`/`TimeSync`/`PingResponse` S2C.
 12. Log out: send `CharacterLogOff (0xF653)`; await S2C `CharacterLogOff` + `CharacterList` +
     `ServerName` (back in `AuthConnected`), then close.
-13. All post-handshake C2S: `Header.Id = NetID`, packet seq `2,3,4,…`, fragment seq
-    `1,2,3,…`, plain (or encrypted) checksum per §4.3. Detect server death by silence (§13).
+13. All post-handshake C2S: `Header.Id = NetID`, packet seq `2,3,4,…` (PAKs reuse the current
+    value — Step 4), fragment seq `1,2,3,…`, plain (or encrypted) checksum per §4.3. Detect server
+    death by silence (§13).
 
 ## 18. Trade
 

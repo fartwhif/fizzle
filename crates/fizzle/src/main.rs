@@ -3,7 +3,9 @@
 mod app;
 mod movement;
 mod net;
+mod plain;
 mod profiles;
+mod themes;
 mod ui;
 mod world;
 
@@ -12,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use crossterm::event::{
-    self, Event, KeyCode, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -22,9 +24,11 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
+use acgeo::World3D;
 use app::App;
 use net::DEFAULT_GAME_PORT;
 use profiles::Profiles;
+use themes::Theme;
 
 #[derive(Parser, Debug)]
 #[command(name = "fizzle", version, about = "Terminal TUI client for Asheron's Call (ACE)")]
@@ -52,6 +56,10 @@ struct Cli {
     /// Character to auto-enter once the character list arrives
     #[arg(long)]
     character: Option<String>,
+
+    /// UI mode: `tui` (default, ratatui console) or `plain` (stdout, no TUI)
+    #[arg(long, default_value = "tui")]
+    ui: String,
 }
 
 /// Restores the terminal even on a panic mid-session.
@@ -60,7 +68,12 @@ struct TermCleanup;
 impl Drop for TermCleanup {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags, LeaveAlternateScreen);
+        let _ = execute!(
+            io::stdout(),
+            PopKeyboardEnhancementFlags,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
     }
 }
 
@@ -107,9 +120,19 @@ fn main() -> anyhow::Result<()> {
 
     let mut app = App::new(&host, cli.port, &account, &password);
     app.auto_character = cli.character.clone();
-    app.start()?;
+    // Persisted UI settings, and the 3D world (None when the retail DATs are
+    // unavailable — the client still runs, with the tactical radar only).
+    app.theme = Theme::parse(&profiles.theme).unwrap_or(Theme::Custom);
+    app.world_view = profiles.world_view == "3d";
+    app.glow_actors = profiles.glow_actors;
+    app.dat_dir = profiles.dat_dir.clone();
+    app.world3d = Some(World3D::new(app.dat_dir.as_deref()));
+    app.start();
 
-    run_event_loop(&mut app)
+    match cli.ui.as_str() {
+        "plain" => plain::run(&mut app),
+        _ => run_event_loop(&mut app),
+    }
 }
 
 fn run_event_loop(app: &mut App) -> anyhow::Result<()> {
@@ -118,6 +141,7 @@ fn run_event_loop(app: &mut App) -> anyhow::Result<()> {
     execute!(
         stdout,
         EnterAlternateScreen,
+        EnableMouseCapture,
         PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                 | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
@@ -130,17 +154,29 @@ fn run_event_loop(app: &mut App) -> anyhow::Result<()> {
     let result: anyhow::Result<()> = loop {
         terminal.draw(|f| ui::draw(f, app))?;
         if app.quit {
+            // Retail exit path: broadcast the Disconnect (0x8000) so the
+            // server drops the session now instead of on its 15 s timeout.
+            app.teardown();
             break Ok(());
         }
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(k) = event::read()? {
-                if k.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
-                    && k.code == KeyCode::Char('c')
-                {
-                    app.quit = true;
-                } else {
-                    app.on_key(&k);
+            match event::read()? {
+                Event::Key(k) => {
+                    if k.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                        && k.code == KeyCode::Char('c')
+                    {
+                        app.quit = true;
+                    } else {
+                        app.on_key(&k);
+                    }
                 }
+                Event::Mouse(m) => {
+                    if let Ok(size) = terminal.size() {
+                        let area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
+                        ui::mouse(app, area, &m);
+                    }
+                }
+                _ => {}
             }
         }
         // Drain network events before mutating app state.

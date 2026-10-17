@@ -1,0 +1,7 @@
+[package]
+name = "acgeo"
+description = "Asheron's Call geometry & 3D world: retail DAT parsing, terrain, meshes, software 3D renderer, terrain/collision probe, Dereth map"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

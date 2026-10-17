@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "acgeo"
+version = "0.1.0"
+
+[[package]]
 name = "acproto"
 version = "0.1.0"
 
@@ -240,6 +244,7 @@ dependencies = [
 name = "fizzle"
 version = "0.1.0"
 dependencies = [
+ "acgeo",
  "acproto",
  "anyhow",
  "clap",

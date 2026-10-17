@@ -13,7 +13,7 @@
 //! a `PlayerTeleport`).
 
 use std::time::Instant;
-
+use acgeo::WorldProbe;
 use acproto::codec::{Position, Quat, Vec3};
 use acproto::motion::{
     autonomous_position_body, command, hold_key, jump_body, MoveToState, MOTION_STYLE,
@@ -33,6 +33,7 @@ const JUMP_VZ0: f32 = 2.75;
 const GRAVITY: f32 = 9.8;
 const AUTOPOS_INTERVAL: f32 = 1.0; // seconds
 const CORRECTION_THRESHOLD: f32 = 0.25;
+const SUBSTEP: f32 = 0.4; // max distance per collision sub-step
 const PI: f32 = std::f32::consts::PI;
 
 /// The discrete keys that affect the motion signature.
@@ -189,7 +190,9 @@ impl Movement {
     /// Advance the simulation by `dt` and return the actions to send.
     ///
     /// `jump` is edge-triggered and consumed. Call at the 50 ms cadence.
-    pub fn tick(&mut self, dt: f32, held: &mut HeldKeys, walking: bool, now: Instant) -> Vec<MoveAction> {
+    /// `probe` supplies terrain height + solid/door blocking; `None` keeps the
+    /// flat-plane behavior (no retail dats).
+    pub fn tick(&mut self, dt: f32, held: &mut HeldKeys, walking: bool, now: Instant, mut probe: Option<&mut dyn WorldProbe>) -> Vec<MoveAction> {
         let mut out = Vec::new();
 
         let speed = if walking { WALK_SPEED } else { RUN_SPEED };
@@ -240,11 +243,26 @@ impl Movement {
             self.heading += 2.0 * PI;
         }
 
-        // Integrate horizontal position.
-        self.pos.x += vx * dt;
-        self.pos.y += vy * dt;
+        // Integrate horizontal position (sub-stepped against the probe so a
+        // long step cannot tunnel a thin wall).
+        let (dx, dy) = (vx * dt, vy * dt);
+        let dist = (dx * dx + dy * dy).sqrt();
+        if dist > 0.0 {
+            let n = if probe.is_some() {
+                ((dist / SUBSTEP).ceil()).max(1.0) as usize
+            } else {
+                1
+            };
+            let (sx, sy) = (dx / n as f32, dy / n as f32);
+            for _ in 0..n {
+                self.step_once(sx, sy, &mut probe);
+            }
+        }
 
-        // Jump + gravity.
+        // Terrain following + vertical (the probe's terrain is the ground).
+        if let Some(g) = probe.as_mut().and_then(|p| p.height_at(self.pos.x, self.pos.y)) {
+            self.ground_z = g;
+        }
         if held.jump && self.grounded {
             self.vz = JUMP_VZ0;
             self.grounded = false;
@@ -256,11 +274,13 @@ impl Movement {
         if !self.grounded {
             self.vz -= GRAVITY * dt;
             self.pos.z += self.vz * dt;
-            if self.pos.z <= self.ground_z {
+            if self.pos.z <= self.ground_z && self.vz <= 0.0 {
                 self.pos.z = self.ground_z;
                 self.vz = 0.0;
                 self.grounded = true;
             }
+        } else if probe.is_some() {
+            self.pos.z = self.ground_z;
         }
 
         self.moving = !held.is_idle() || !self.grounded;
@@ -286,6 +306,41 @@ impl Movement {
         }
 
         out
+    }
+
+    /// Advance one collision sub-step; a solid blocks the full step, then each
+    /// axis separately (the player slides along a wall instead of stopping
+    /// dead). With no probe this is a plain horizontal step.
+    fn step_once(&mut self, sx: f32, sy: f32, probe: &mut Option<&mut dyn WorldProbe>) {
+        if probe.is_none() {
+            self.pos.x += sx;
+            self.pos.y += sy;
+            return;
+        }
+        let p = probe.as_mut().expect("checked above");
+        let (x0, y0, z0) = (self.pos.x, self.pos.y, self.pos.z);
+        let (tx, ty) = (x0 + sx, y0 + sy);
+        let gt = p.height_at(tx, ty).unwrap_or(z0);
+        if !p.blocked(x0, y0, z0, tx, ty, gt) {
+            self.pos.x = tx;
+            self.pos.y = ty;
+        } else {
+            let gx = p.height_at(tx, y0).unwrap_or(z0);
+            if !p.blocked(x0, y0, z0, tx, y0, gx) {
+                self.pos.x = tx;
+            } else {
+                let gy = p.height_at(x0, ty).unwrap_or(z0);
+                if !p.blocked(x0, y0, z0, x0, ty, gy) {
+                    self.pos.y = ty;
+                }
+            }
+        }
+        if self.grounded {
+            if let Some(g) = p.height_at(self.pos.x, self.pos.y) {
+                self.pos.z = g;
+                self.ground_z = g;
+            }
+        }
     }
 
     /// Adopt a server correction. Returns true if a fresh `MoveToState` is

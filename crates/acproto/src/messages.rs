@@ -43,6 +43,14 @@ pub mod opcode {
     pub const EMOTE_TEXT: u32 = 0x01E0;
     pub const PLAYER_KILLED: u32 = 0x019E;
     pub const PRIVATE_UPDATE_ATTRIBUTE_2ND_LEVEL: u32 = 0x02E9;
+    /// `PrivateUpdateVital` (0x02E7): full vital state for self (ranks/
+    /// starting/xp/current). The server may send either this or 0x02E9.
+    pub const PRIVATE_UPDATE_VITAL: u32 = 0x02E7;
+    /// `PrivateUpdatePropertyInt` (0x02CD): a self PropertyInt update
+    /// (e.g. CoinValue after a buy/sell, CombatMode echoes).
+    pub const PRIVATE_UPDATE_PROPERTY_INT: u32 = 0x02CD;
+    /// `HearRangedSpeech` (0x02BC): out-of-earshot speech with a range.
+    pub const HEAR_RANGED_SPEECH: u32 = 0x02BC;
 }
 
 /// `GameActionType` values (C2S actions, wrapped in `GAME_ACTION`).
@@ -59,6 +67,23 @@ pub mod action {
     pub const JUMP: u32 = 0xF61B;
     pub const MOVE_TO_STATE: u32 = 0xF61C;
     pub const AUTONOMOUS_POSITION: u32 = 0xF753;
+    pub const PUT_ITEM_IN_CONTAINER: u32 = 0x0019;
+    pub const GET_AND_WIELD_ITEM: u32 = 0x001A;
+    pub const DROP_ITEM: u32 = 0x001B;
+    pub const USE_WITH_TARGET: u32 = 0x0035;
+    pub const USE: u32 = 0x0036;
+    pub const BUY: u32 = 0x005F;
+    pub const SELL: u32 = 0x0060;
+    pub const OPEN_TRADE_NEGOTIATIONS: u32 = 0x01F6;
+    pub const CLOSE_TRADE_NEGOTIATIONS: u32 = 0x01F7;
+    pub const ADD_TO_TRADE: u32 = 0x01F8;
+    pub const ACCEPT_TRADE: u32 = 0x01FA;
+    pub const DECLINE_TRADE: u32 = 0x01FB;
+    pub const RESET_TRADE: u32 = 0x0204;
+    pub const NO_LONGER_VIEWING_CONTENTS: u32 = 0x0195;
+    pub const FELLOWSHIP_UPDATE_REQUEST: u32 = 0x00A6;
+    pub const ALLEGIANCE_UPDATE_REQUEST: u32 = 0x001F;
+    pub const HOUSE_QUERY: u32 = 0x021E;
 }
 
 /// `GameEventType` values (S2C events, wrapped in `GAME_EVENT`).
@@ -73,6 +98,39 @@ pub mod event {
     pub const PING_RESPONSE: u32 = 0x01EA;
     pub const SET_TURBINE_CHAT_CHANNELS: u32 = 0x0295;
     pub const TELL: u32 = 0x02BD;
+    pub const POPUP_STRING: u32 = 0x0004;
+    pub const FRIENDS_LIST_UPDATE: u32 = 0x0021;
+    pub const INVENTORY_PUT_OBJ_IN_CONTAINER: u32 = 0x0022;
+    pub const WIELD_OBJECT: u32 = 0x0023;
+    pub const CHARACTER_TITLE: u32 = 0x0029;
+    pub const INVENTORY_PUT_OBJECT_IN_3D: u32 = 0x019A;
+    pub const INVENTORY_SERVER_SAVE_FAILED: u32 = 0x00A0;
+    pub const APPROACH_VENDOR: u32 = 0x0062;
+    pub const WEENIE_ERROR: u32 = 0x028A;
+    pub const WEENIE_ERROR_WITH_STRING: u32 = 0x028B;
+    pub const REGISTER_TRADE: u32 = 0x01FD;
+    pub const CLOSE_TRADE: u32 = 0x01FF;
+    pub const ADD_TO_TRADE: u32 = 0x0200;
+    pub const REMOVE_FROM_TRADE: u32 = 0x0201;
+    pub const ACCEPT_TRADE: u32 = 0x0202;
+    pub const DECLINE_TRADE: u32 = 0x0203;
+    pub const RESET_TRADE: u32 = 0x0205;
+    pub const TRADE_FAILURE: u32 = 0x0207;
+    pub const CLEAR_TRADE_ACCEPTANCE: u32 = 0x0208;
+    pub const COMMUNICATION_TRANSIENT_STRING: u32 = 0x02EB;
+    pub const MAGIC_UPDATE_ENCHANTMENT: u32 = 0x02C2;
+    pub const UPDATE_TITLE: u32 = 0x002B;
+    pub const SET_SQUELCH_DB: u32 = 0x01F4;
+    pub const SEND_CLIENT_CONTRACT_TRACKER_TABLE: u32 = 0x0314;
+    pub const SEND_CLIENT_CONTRACT_TRACKER: u32 = 0x0315;
+    pub const ALLEGIANCE_UPDATE: u32 = 0x0020;
+    pub const FELLOWSHIP_FULL_UPDATE: u32 = 0x02BE;
+    pub const HOUSE_DATA: u32 = 0x0225;
+    pub const HOUSE_STATUS: u32 = 0x0226;
+    pub const CLOSE_GROUND_CONTAINER: u32 = 0x0052;
+    pub const VIEW_CONTENTS: u32 = 0x0196;
+    pub const USE_DONE: u32 = 0x01C7;
+    pub const ATTACK_DONE: u32 = 0x01A7;
 }
 
 /// `CombatMode` bitmask (PropertyInt 40 / `CHANGE_COMBAT_MODE` body).
@@ -134,6 +192,215 @@ pub mod vital {
     pub const STAMINA: u32 = 4;
     pub const MANA: u32 = 6;
 }
+
+/// Retail skill ID -> name (`ACE.Entity.Enum.Skill`, IDs 0..=55).
+pub const SKILL_NAMES: &[&str] = &[
+    "None", "Axe", "Bow", "Crossbow", "Dagger", "Mace", "Melee Defense",
+    "Missile Defense", "Sling", "Spear", "Staff", "Sword", "Thrown Weapon",
+    "Unarmed Combat", "Arcane Lore", "Magic Defense", "Mana Conversion",
+    "Spellcraft", "Item Tinkering", "Assess Person", "Deception", "Healing",
+    "Jump", "Lockpick", "Run", "Awareness", "Arms & Armor Repair",
+    "Assess Creature", "Weapon Tinkering", "Armor Tinkering",
+    "Magic Item Tinkering", "Creature Enchantment", "Item Enchantment",
+    "Life Magic", "War Magic", "Leadership", "Loyalty", "Fletching",
+    "Alchemy", "Cooking", "Salvaging", "Two-Handed Combat", "Gearcraft",
+    "Void Magic", "Heavy Weapons", "Light Weapons", "Finesse Weapons",
+    "Missile Weapons", "Shield", "Dual Wield", "Recklessness", "Sneak Attack",
+    "Dirty Fighting", "Challenge", "Summoning",
+];
+
+/// `WeenieError` codes the client surfaces.
+pub mod weenie_error {
+    pub const TRADE_MAX_DISTANCE_EXCEEDED: u32 = 0x044E;
+    pub const TRADE_ALREADY_TRADING: u32 = 0x044F;
+    pub const TRADE_COMPLETE: u32 = 0x0529;
+    pub const LOCK_ALREADY_UNLOCKED: u32 = 0x04AF;
+    pub const YOU_CANNOT_LOCK_OR_UNLOCK_THAT: u32 = 0x04B0;
+    pub const YOU_CANNOT_LOCK_WHAT_IS_OPEN: u32 = 0x04B1;
+    pub const KEY_DOESNT_FIT_THIS_LOCK: u32 = 0x04B2;
+    pub const LOCK_USED_TOO_RECENTLY: u32 = 0x04B3;
+    pub const YOU_ARENT_TRAINED_IN_LOCKPICKING: u32 = 0x04B4;
+    pub const ATTUNED_ITEM: u32 = 0x0426;
+
+    /// Retail-style display text for the codes above (the wire carries only
+    /// the numeric code).
+    pub fn name(code: u32) -> Option<&'static str> {
+        Some(match code {
+            TRADE_MAX_DISTANCE_EXCEEDED => "That trade partner is too far away.",
+            TRADE_ALREADY_TRADING => "You are already trading with another character.",
+            TRADE_COMPLETE => "The trade is complete.",
+            LOCK_ALREADY_UNLOCKED => "The lock is already unlocked.",
+            YOU_CANNOT_LOCK_OR_UNLOCK_THAT => "You can't lock or unlock that!",
+            YOU_CANNOT_LOCK_WHAT_IS_OPEN => "You can't lock or unlock what is open!",
+            KEY_DOESNT_FIT_THIS_LOCK => "The key doesn't fit this lock.",
+            LOCK_USED_TOO_RECENTLY => "The lock has been used too recently.",
+            YOU_ARENT_TRAINED_IN_LOCKPICKING => "You aren't trained in lockpicking!",
+            ATTUNED_ITEM => "You can't drop attuned items.",
+            _ => return None,
+        })
+    }
+}
+
+/// `UseDone` (0x01C7) WeenieError codes the server does NOT also send as a
+/// transient chat string (the key/lockpick results): code -> text to show.
+/// (retail's lock error strings)
+pub const USE_DONE_TEXT: &[(u32, &str)] = &[
+    (weenie_error::LOCK_ALREADY_UNLOCKED, "The lock is already unlocked."),
+    (weenie_error::YOU_CANNOT_LOCK_OR_UNLOCK_THAT, "You can't lock or unlock that!"),
+    (weenie_error::YOU_CANNOT_LOCK_WHAT_IS_OPEN, "You can't lock or unlock what is open!"),
+    (weenie_error::KEY_DOESNT_FIT_THIS_LOCK, "The key doesn't fit this lock."),
+    (weenie_error::LOCK_USED_TOO_RECENTLY, "The lock has been used too recently."),
+    (weenie_error::YOU_ARENT_TRAINED_IN_LOCKPICKING, "You aren't trained in lockpicking!"),
+];
+
+/// Retail character title ids (`ACE.Entity.Enum.CharacterTitle`, 0-based
+/// sequential; ids are enum values).
+pub const TITLE_NAMES: &[&str] = &[
+    "Invalid", "Adventurer", "Archer", "Blademaster", "Enchanter", "LifeMage", "Sorcerer", "Vagabond",
+    "Warrior", "BowHunter", "LifeCaster", "Soldier", "Swashbuckler", "WarMage", "Wayfarer", "AbhorrentWarrior",
+    "Alchemist", "Annihilator", "Apothecary", "ArcticAdventurer", "ArcticMattekarAnnihilator", "Artifex", "AxeWarrior", "Ballisteer",
+    "BaneoftheRemoran", "BloodShrethButcher", "Bloodletter", "BrooduKiller", "BrowerkKiller", "BugButcher", "Bugstomper", "BunnyMaster",
+    "CarenziSlayer", "ChainBreaker", "ChampionofDereth", "ChampionofSanamar", "ChampionofSilyun", "Chef", "CreatureAdept", "DaggerFighter",
+    "Deadeye", "DeathcapDefeater", "DefenderofDereth", "Deliverer", "Diplomat", "DireMattekarDispatcher", "Duelist", "EbonGromnieEradicator",
+    "EngorgedScourge", "Evoker", "Explorer", "Exterminator", "Fisherman", "Fletcher", "FloesharkFlogger", "FriendofSanamar",
+    "FriendofSilyun", "GaerlanSlayer", "GardenerWeeder", "GlendenWoodKnight", "GlendenWoodMilitia", "GoldenGod", "GraveRobber", "GuardianofDereth",
+    "Gumshoe", "GuppyMaster", "HeartRipper", "HeroofDereth", "HeroofSanamar", "HeroofSilyun", "HonorarySnowman", "HonoraryWindreave",
+    "Hunter", "Impaler", "InsatiableSlayer", "InvadersBane", "IronChef", "IronSpinedChittickImmolator", "ItemAdept", "KeeperofDereth",
+    "KeerikKiller", "Kingslayer", "KireeKiller", "KnathAndrasAssassinator", "Lakeman", "LifeAdept", "Lightbringer", "MaceWarrior",
+    "ManAtArmsThrasher", "MasterFletcher", "MasterofSlaughter", "MasterofStaves", "Miner", "MoarsmanDefiler", "MoraleSmasher", "MosswartWorshipperWhipper",
+    "MottledCarenziMauler", "MudSlinger", "NaughtySkeletonSnuffer", "OlthoiRipperReducer", "ParagonofDeath", "Philanthropist", "PlateArmoredilloPunisher", "PlatinumProwler",
+    "PolarUrsuinPounder", "PolardilloPummeler", "PondScum", "ProFisherman", "Projectilist", "Pugilist", "Queenslayer", "RavenousKiller",
+    "RedFury", "ReeshanKiller", "RehirKiller", "RepugnantEaterRipper", "ResistanceFighter", "ResistanceRecruit", "ServantofTheDeep", "SezzhereiSlayer",
+    "ShadowStalker", "ShallowsSharkNemesis", "Sharpshooter", "ShellfishHater", "ShieldofGlenden", "Shredder", "SilverSerf", "SiraluunSlasher",
+    "Skipper", "Skullcrusher", "Skullsplitter", "Slicer", "Sniper", "SoldierSlaughterer", "SpearWarrior", "SpringCleaner",
+    "StaffWarrior", "Stonebreaker", "Sureshot", "Swordfighter", "Theurgist", "ThrungusReaper", "Timberman", "Tracker",
+    "Trapper", "TukoraLieutenantTrouncer", "UnarmedBrawler", "ViolatorGrievverVetoer", "VoraciousFlayer", "VoraciousHunter", "WarAdept", "WardenofDereth",
+    "Warlock", "WarlordofDereth", "WarriorVanquisher", "WickedSkeletonWalloper", "WindreaveStalker", "WorkerObliterator", "DryreachMilitia", "HonoraryShadowHunter",
+    "PerforatedKnight", "UNKNOWNGUESSEDNAME161", "PestControl", "RatReaper", "NymphManiac", "SimiuS", "SecondPlaceLoreQuizNight", "ACVeteran",
+    "Aintafraidofnoghost", "Aintafraidofnoghosttwo", "Aintafraidofnoghostthree", "AnkleBiter", "AnnoyingFurryTalkingAnimal", "ArcherAssassin", "Archmage", "AsheronsCallGod",
+    "AvatarofKain", "AzureAssailant", "BabyBunnyMaster", "BaronOddity", "BeginningoftheEnd", "BestMeleeinDT", "BigBlock", "BigRocx",
+    "Blood", "BountyHunter", "BritishTootsie", "BugBait", "BunnyKiller", "CarebearStare", "CertifiedGanksta", "ChickenNugget",
+    "ChickenSelect", "ChimaerasChampion", "CoMonarchofTheChosen", "ContainmentUnit", "CoolestTitleEver", "CorrosiveSoul", "CowKiller", "Cowboy",
+    "CrystalLordKing", "CuddlyKitten", "CurmudgeonsFriend", "CursedAdventurer", "DaggerMaster", "DarkSwordLady", "DarktidesFinest", "DarktidesMostWanted",
+    "DeadMeat", "DeadlyEggburt", "DeathbyDefault", "DeathbyPumpkin", "DeathbySappho", "DeathSpecialist", "DefenderofMrP", "DerethsGladiator",
+    "DerethsMasterDodger", "DevEvader", "DevKiller", "DevSlayer", "DoubleFashionKing", "DoubleGolemKiller", "DoubleSurvivalChampion", "DudeofDOOM",
+    "EctoCooler", "EctoCoolertwo", "EnvoySlayer", "EscapeeKiller", "EvilToothfairy", "FancyTitle", "FashionKing", "FashionPenguinKing",
+    "FashionQueen", "FashionVictim", "FearlessFighter", "FlagBoy", "FrelornSlayer", "FriendtoMrP", "GangstaStyle", "Gangster",
+    "Ghostbuster", "Gimp", "GimpGoddess", "GimpyMageofMight", "GladiatorChampion", "GlowingArcher", "GodoftheSwordsman", "GolemKiller",
+    "GolemSlayer", "GreatPookieSlayer", "GuardianAngel", "GuardianofArwic", "HamsterHerder", "HamsterVitae", "HaveBunniesWillTravel", "HaveTrikeWillBabble",
+    "HideandSeekSpecialist", "HollywoodBud", "HoltburgSurvivalChampion", "HoltburgsSurvivorChampion", "HonoraryPinkEep", "HungryHungryHippo", "HusbandofLynnie", "HusbandsHealer",
+    "IamBigPIMPIN", "Ilikeddying", "JessicaHeart", "KingofallthatisPumpkin", "KingofCaul", "KingofDarktide", "KingofPierceDiggys", "KnightRider",
+    "LadyoftheFourTowers", "LangeGang", "LevelMaster", "Leviathan", "LeviathanSlayer", "LibeEventsManager", "LifePreserver", "LiveEventCoordinator",
+    "LiveEventsManager", "LiveOpCoordinator", "LoreSecondPlace", "LoreSecondPlaceQuizNight", "LoreChampionQuizNight1", "LoreChampionQuizNight2", "LoreMaster", "LoreMasterQuizNight1",
+    "LoreMasterQuizNight2", "LoreMasterSecondPlace", "LoreMasterofStaves", "LotsofVitae", "LuckyLady", "MadCowSlayer", "MagesAssitant", "MasterTinkerer",
+    "MayorofAyanBaqur", "MintyFresh", "MisunderstoodPengy", "Mom", "MommyPengy", "MosswartAlly", "MrNiceGuy", "Murderer",
+    "Murderertwo", "NewbyTitle", "NiceBlueLady", "Numberonedraftpick", "OldSchool", "ParadoxSlayer", "PatronSaintoftheLifestone", "Peacebear",
+    "PenguinKiller", "PigFarmer", "PinkBunnyKiller", "PinkBunnyMaster", "PinkGoddess", "PinkLady", "PKQueen", "PlayaKillaKing",
+    "PokemonSlayer", "PrettyPumpkin", "Prisoner", "ProtectoroftheCheese", "ProtonPack", "PumpkinSlayer", "PumpkinStalker", "PurplePengy",
+    "PwnerofNewbs", "QueenofBrats", "QueensCrafter", "QueensCraftertwo", "QueensPackRat", "QueensPackrat", "QueensTinker", "Rawr",
+    "RaynesMagePet", "ReggaeRenegade", "RingBearer", "RingringringBananaphone", "RoadKill", "RollingDeathDestroyer", "RoyalChef", "RoyalCook",
+    "Rugged", "SanitationEngineer", "ScarecrowSlayer", "ScaryPumkpkinDominator", "ScaryPumpkinSlayer", "Sentinal", "Sentry", "ShadowChild",
+    "ShadowHunter", "ShadowSlayer", "SlayeroftheGreatPookie", "Slimer", "SnazzyDresser", "SoulMan", "SpookyTitle", "StaffMasta",
+    "StaypuffedMallowGirl", "SuperGimpedAdventurer", "Supercalifragilisticexpialidocious", "Superman", "SurvivorChampion", "SwordScholar", "TehNewb", "TehSaint",
+    "TestingGuy", "TheBait", "TheChosenKing", "TheComeBackKid", "TheForgotten", "TheGimped", "TheGreatandPowerful", "TheHalfFox",
+    "TheNoob", "ThePurpleFez", "ThePwnerer", "TheUnknownPk", "ThunderChickenSlayer", "TMKiller", "ToughGuy", "TradesmanofAuberean",
+    "TreasureHunter", "TremendousMonougaMaster", "TripleGolemKiller", "TurbineSlayer", "TwinsofTerror", "UberestNoobonFrostfell", "UnderworldThugg", "ViamontianSlayer",
+    "VitaeKing", "VitaeVixen", "VixenofVitae", "WabbitBait", "WabbitKiller", "WanderingFool", "WardensAssistant", "WardensThug",
+    "Wimp", "WolfpackCrafter", "WonderWoman", "Yagotserved", "GIMPcaps", "WardensAssistanttwo", "SupremeBunnyMaster", "GuardianoftheDark",
+    "AprilsFool", "UlgrimsEep", "MukkirMasher", "HarbingersBane", "MasteroftheElements", "KillcranesAlly", "ApprenticeShadowHunter", "SquireoftheGoldenFlame",
+    "KnightoftheGoldenFlame", "KnightoftheWhisperingBlade", "TheBlackSpear", "UNKNOWNGUESSEDNAME419", "CarraidasAvenger", "ParagonoftheWhisperingBlade", "ParagonoftheRossuMorta", "ChosenofVaricci",
+    "ChosenofElysa", "SmallMukkirSquasher", "BloodWarrior", "Strategist", "WarBeast", "ChampionofDaemal", "HerooftheGoldenFlame", "SlayeroftheBlackSpear",
+    "UNKNOWNGUESSEDNAME432", "ObviouslyBored", "ZefirZapper", "TuskerBlight", "ElementalEradicator", "ExpertBanishedHunter", "ExpertFallenHunter", "EliteHeadHunter",
+    "FriendoftheFrostglaive", "SquireofNewViamont", "Reanimator", "ZombieIncursionSurvivor", "UlgrimsDrinkingBuddy", "MasterofthePorcelainAltar", "MasteroftheMysticalMug", "ColosseumChampion",
+    "Titan", "Colossus", "MasterGladiator", "Fearless", "LordoftheArena", "RingMaster", "PitFighter", "Myrmidon",
+    "HostileCombatant", "Survivalist", "WarrioroftheSeventhCircle", "Gladiator", "Contender", "DrudgeDread", "ArenaCustodian", "ArenaRat",
+    "Scrapper", "ChampionRingIII", "ChampionRingV", "ChampionRingVI", "ChampionRingVII", "ChampionRingXII", "MasterChampionRingX", "RuukAlly",
+    "SeekerofAsheron", "SeekerofTorgluuk", "PortalRitualist", "RangerRuuk", "BasherSlasher", "GurukHunter", "DeadEyefortheColossi", "FiendishHuntsman",
+    "MonsterKiller", "BoshBoshKibosh", "MushroomCollector", "FungalFarmer", "MushroomMan", "Fungi", "MushroomKing", "Thrungamandius",
+    "InitiateoftheBlade", "TorgluuksLiberator", "BurunLiberator", "AsheronsSavior", "AsheronsDefender", "UNKNOWNGUESSEDNAME493", "FuzzyBunnySlayer", "MoarHunter",
+    "SpiketoothSlayer", "TowerGuardianArchitect", "ArtisanoftheFlameandLight", "GuardianoftheTower", "CragstoneMilitia", "CragstoneKnight", "GuardianofCragstone", "KnightoftheWindmill",
+    "HeroOfHouseMhoire", "LadyTairlasChampion", "RoyalInvestigator", "WangaFighter", "HoogansHero", "CragstoneFirefighter", "UNKNOWNGUESSEDNAME510", "StalkerStalker",
+    "Ravenous", "AlteredHunter", "AugmentedHunter", "DrudgeDoom", "DefenderofKryst", "ParadoxtouchedQueenslayer", "AmeliasCaretaker", "ProdigalTuskerSlayer",
+    "MudmouthsBane", "OolutangasBane", "ProdigalShadowSlayer", "ProdigalHarbingerSlayer", "BloodSeeker", "StormRider", "Meddler", "VileBetrayer",
+    "Spy", "SlithisSlayer", "ChosenoftheRift", "RiftShifter", "RiftWalker", "ReefBuilder", "ReefBreaker", "CryptRat",
+    "GraveStalker", "BoneBreaker", "CryptCreeper", "TombRaider", "FolloweroftheVine", "Harvester", "HarvesterHarvester", "HarvesterHarvesterHarvester",
+    "PumpkinThroneUsurper", "DeathKnight", "NullTitle", "TrackerGuardian", "DojiroSangisSavior", "MasteroftheHunt", "InitiateoftheHunt", "ApprenticeoftheHunt",
+    "DiscipleoftheHunt", "SeekeroftheHunt", "ChampionoftheHunt", "GuardianofLinvakTukal", "UnwittingParticipant", "FriendofRheaga", "SlayerofRheaga", "ProtectorofthePast",
+    "WarriorofthePast", "Anthropologist", "GoldFarmer", "ThirdEyeBlinder", "DireDrudgeDecapitator", "RenegadeHunter", "BanderlingBully", "Xenophobic",
+    "ShadowSunderer", "DireHuntsman", "GameWarden", "HonoraryReaoftheAun", "HopeofthePast", "BeaconofHope", "AerbaxsBane", "AerbaxSlayer",
+    "JestersEmancipator", "JestersFool", "JestersAccomplice", "HonoraryBurunScout", "MarbleWrangler", "SecretKeeper", "JestersLittleHelper", "HardToKill",
+    "Expendable", "NoviceoftheSea", "AcolyteoftheSea", "MinisteroftheSea", "DefenderoftheSea", "ChampionoftheSea", "MasteroftheSea", "DefeaterOfTheBlight",
+    "ChampionoftheAerlintheNode", "ChampionoftheAmunNode", "ChampionoftheEsperNode", "ChampionoftheHalaetanNode", "ChampionoftheLinvakNode", "ChampionoftheObsidianNode", "UNKNOWNGUESSEDNAME598", "UlgrimsHappyHundredth",
+    "PluckerofEyes", "WardenoftheBurningWood", "ToughTough", "Archaeologist", "HeroofWoe", "DefenderofSilyun", "MemorialChampion", "ThaneofColier",
+    "GuardianoftheKeep", "WarrioroftheCraterLake", "UNKNOWNGUESSEDNAME610", "Arwician", "DesertWarrior", "MayoiProtector", "StoneCollector", "RockStar",
+    "RockHound", "WarriorofWoe", "Haswaytoomuchtime", "ChampionImmemorial", "ColierMiner", "Legionnaire", "Volcanologist", "HilltopDefender",
+    "ArwicNoble", "Zharalim", "Samurai", "GuardianinthePatriarchRaids", "WardeninthePatriarchRaids", "HeroofthePatriarchRaids", "MarkedbythePatriarchs", "UNKNOWNGUESSEDNAME631",
+    "UNKNOWNGUESSEDNAME632", "UNKNOWNGUESSEDNAME633", "UNKNOWNGUESSEDNAME634", "UNKNOWNGUESSEDNAME635", "UNKNOWNGUESSEDNAME636", "CathedralsChampion", "AsheronsMilitia", "MinikRasBane",
+    "KazykRisBane", "NivinizksBane", "MinikRasNemesis", "KazykRisNemesis", "NivinizksNemesis", "AubereansSentinel", "DerethsElite", "DefenderoftheDeru",
+    "BaneoftheBlessed", "Negotiator", "BaneoftheBlight", "Gifted", "SeasonalSeeker", "AmateurExplorer", "ExperiencedExplorer", "AdeptExplorer",
+    "MasterExplorer", "EliteExplorer", "MountainClimber", "Daredevil", "SkyDiver", "Spelunker", "PartyGoer", "CraterCrasher",
+    "TacticalAid", "TrueTactician", "TacticalFantastical", "FireoftheTanada", "CrystallineAdventurer", "WispWhipper", "BurningSoul", "FrozenFighter",
+    "Dedicated", "Assassin", "DeathDealer", "BridgeJumper", "SureStep", "PlayerSlayer", "BathedinBlood", "IAmDarktide",
+    "DarknessintheLight", "BeginningsEnd", "NexusCrawler", "SelflessSoul", "TimelessAdventurer", "VirindiInformer", "NoCageCouldHoldMe", "AllforOne",
+    "OneforAll", "JackOAllTrades", "KnightoftheNortheastTower", "KnightoftheNorthwestTower", "KnightoftheSoutheastTower", "KnightoftheSouthwestTower", "KnightoftheMhoireThrone", "HistorianoftheMhoireThrone",
+    "ChampionofHouseMhoire", "SwordbearerofHouseMhoire", "ArchmageofHouseMhoire", "SeekerofCastleMhoire", "StewardofCastleMhoire", "GoldenGearCrafter", "AllyoftheGoldPrimus", "GearKnightAssassin",
+    "GearKnightRecruiter", "GearKnightEmissary", "MenhirSeeker", "ManaFieldFinder", "AssistantsAssistant", "ArcanumAdventurer", "GearKnightDefender", "Ripper",
+    "AcidSpitter", "BloodstoneHunter", "GuidingLight", "CloudedSoul", "UndercoverofDarkness", "BroughttoLight", "UNKNOWNGUESSEDNAME718", "IlluminatingtheShadows",
+    "ExploringArchaeologist", "ContractKiller", "ShadowPuppet", "Hopebringer", "IntheDark", "UNKNOWNGUESSEDNAME725", "SearchingShadows", "ShadowSoldier",
+    "BrightKnight", "MercifulKiller", "SoulSiphon", "TheTouTouTerror", "DoubleAgent", "DuleingwiththeDark", "CreatureofChaos", "Conspirator",
+    "HerooftheNight", "MasteroftheTwistedWord", "TheNightmareLord", "TheNightmareMage", "TheTwistedWeaver", "LordofDarkDreams", "UNKNOWNGUESSEDNAME742", "TheDarkDreamwalker",
+    "UNKNOWNGUESSEDNAME744", "TheDreamslayer", "TheNightmareStalker", "UNKNOWNGUESSEDNAME747", "TheThoughtSpiral", "UNKNOWNGUESSEDNAME749", "UNKNOWNGUESSEDNAME750", "MasteroftheOubliette",
+    "UNKNOWNGUESSEDNAME751", "TheRestless", "FierySpirit", "IcyVeins", "ShockingDisposition", "AcidicSoul", "GroundedMorals", "DarkenedHeart",
+    "TheTrueEmperor", "BearerofDarkness", "UNKNOWNGUESSEDNAME762", "HealerRitualist", "VanquisheroftheTitan", "DerethianNewbie", "NoviceWanderer", "NotableCitizen",
+    "AdeptAdventurer", "IntrepidExplorer", "SupremeSoldier", "EpicWarrior", "ParagonofNewAluvia", "AnAubereanLegend", "Heretic", "Captain",
+    "PetSavior", "AvalancheAvoider", "LiberatorofUziz", "OutofTune", "HiveQueenslayer", "EvisceratorDecimator", "UltimateWarrior", "StoneColdKiller",
+    "QuellerofRage", "EnderofTorment", "ControllerofEmotions", "RynthidRavager", "LothusServitor", "AllyoftheLothus", "AllyoftheCouncil", "EmotionalWreck",
+    "MinionMarauder", "RynthidWrecker", "NightOwl", "MenderoftheRift", "SorcererSlayer", "RageQuitter", "Purifier", "FanOfAsheron",
+    "Asherons1", "Shutterbug", "TheFocused", "DerethRecruiter", "FowlFollower", "FollowerofAsheron", "FollowsDirections", "CantFollowDirections",
+    "LikesAsheron", "LikesGettingTitles", "LikesWhereThisIsGoing", "LikesUlgrim", "Likable", "Captivating", "MasterofCeremony", "RoadWarrior",
+    "Thriller", "HauntsYourDreams", "AsheronsCollectCaller", "TheInquisitive", "PortalStormer", "BringerofPain", "HarbingerofMadness", "MarkedByLuck",
+    "MarkedByFate", "MarkedByFame", "MarkedByGlamour", "MarkedByBacon", "Puzzlemaster", "RiddleRavager", "TheCoolKidsClub", "EpicWin",
+    "EpicFail", "AlwaysPickedFirst", "AlwaysPickedLast", "ForeverAlone", "NinetyNineProblemsOlthoiAte1", "HungryforMoar", "ICanHazTitleNao", "Snowbunny",
+    "ColdAsIce", "PenguinPlunge", "FlowerSniffer", "SpringsIntoAction", "HeatsThingsUp", "CruelSummer", "HotintheCity", "RunsThroughSprinklers",
+    "TheKnowledgeable", "WellTrained", "PumpkinLord", "Haunted", "Possessed", "Doomsayer", "Accursed", "ColdTurkey",
+    "JiveTurkey", "PresentProtector", "HollyJollyHelper", "LossPrevention", "ChristmasCourier", "HolidayHero", "CrownOfTheDeru", "ViridianDreamer",
+    "ViridianLord", "ViridianKnight", "ViridianStalker", "ViridianSlayer", "ViridianPurifier", "KnightOfThorns", "HunterOfThorns", "MageOfThorns",
+    "Thornstalker", "ChampionOfTheViridianTree", "CorruptorOfTheRoot", "KillerAmongShadows", "ServantOfTheVile", "KnightOfCorruptedAmber", "GauntletChampion", "Bloodthirsty",
+    "GauntletGladiator", "WilyWarrior", "SoldierOfFortune", "SocietySavage", "CoinCollector", "BrutalBarbarian", "Idolized", "MasterOfPuppets",
+    "TitanSlayer", "Awakened", "Enlightened", "Illuminated", "Transcended", "CosmicConscious", "LastManStanding",
+];
+
+/// `ItemLoadFlag` bits -> retail item category. Checked in this exact order
+/// (first matching flag wins), matching the retail client's `itemTypeName`.
+pub const ITEM_TYPES: &[(u32, &str)] = &[
+    (0x1, "melee"), (0x100, "missile"), (0x2, "armor"), (0x4, "clothing"),
+    (0x8, "jewelry"), (0x10, "creature"), (0x20, "food"), (0x40, "money"),
+    (0x80, "misc"), (0x200, "container"), (0x400, "useless"), (0x800, "gem"),
+    (0x1000, "spellcomp"), (0x2000, "writable"), (0x4000, "key"),
+    (0x8000, "caster"), (0x10000, "portal"), (0x20000, "lockable"),
+    (0x40000, "note"), (0x80000, "manastone"), (0x100000, "service"),
+    (0x200000, "magic"), (0x400000, "cook"), (0x800000, "alchemy"),
+    (0x2000000, "fletch"), (0x4000000, "alchemy+"), (0x8000000, "fletch+"),
+    (0x10000000, "lifestone"), (0x20000000, "tool"), (0x40000000, "material"),
+    (0x80000000, "gameboard"),
+];
+
+/// Retail item category name for an `ItemType` flag word (first matching
+/// flag in `ITEM_TYPES` wins).
+#[must_use]
+pub fn item_type_name(item_type: u32) -> Option<&'static str> {
+    ITEM_TYPES.iter().find(|(flag, _)| item_type & *flag != 0).map(|(_, n)| *n)
+}
+
+/// `TradeSide` ids in trade events (1 = self's side, 2 = partner's).
+pub mod trade_side {
+    pub const SELF: u32 = 1;
+    pub const PARTNER: u32 = 2;
+}
+
+/// Motion command ids for door open/close (from MotionCommand u16 0x0B/0x0C).
+pub const MOTION_CMD_DOOR_ON: u32 = 0x4000_000B;
+pub const MOTION_CMD_DOOR_OFF: u32 = 0x4000_000C;
 
 // =====================================================================
 // C2S handshake + auth body builders
@@ -296,6 +563,17 @@ pub fn body_tell(text: &str, target: &str) -> Vec<u8> {
     w.out
 }
 
+/// `TALK_DIRECT` (0x0032) body: `String16L text, u32 targetGuid` (message
+/// first). A player target receives a Tell; a creature runs its
+/// ReceiveTalkDirect emote set (the "talk to NPC" dialog).
+#[must_use]
+pub fn body_talk_direct(text: &str, target_guid: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.string16l(text);
+    w.u32(target_guid);
+    w.out
+}
+
 /// `CHANGE_COMBAT_MODE` (0x0053) body: `u32 mode`.
 #[must_use]
 pub fn body_change_combat_mode(mode: u32) -> Vec<u8> {
@@ -329,6 +607,168 @@ pub fn body_targeted_melee_attack(target: u32) -> Vec<u8> {
     w.u32(2);
     w.f32(1.0);
     w.out
+}
+
+/// `PUT_ITEM_IN_CONTAINER` (0x0019) body:
+/// `u32 itemGuid, u32 containerGuid, i32 placement`. The player's own guid
+/// unequips to the main pack; a pack's guid moves it into that pack.
+#[must_use]
+pub fn body_put_item_in_container(item: u32, container: u32, placement: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(item);
+    w.u32(container);
+    w.i32(placement);
+    w.out
+}
+
+/// `GET_AND_WIELD_ITEM` (0x001A) body: `u32 itemGuid, i32 location` (EquipMask).
+#[must_use]
+pub fn body_get_and_wield_item(item: u32, equip_mask: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(item);
+    w.i32(equip_mask);
+    w.out
+}
+
+/// `DROP_ITEM` (0x001B) body: `u32 itemGuid`. Drops to the ground at the
+/// player's feet; the server answers with an ObjectDelete + a positioned
+/// ObjectCreate.
+#[must_use]
+pub fn body_drop_item(item: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(item);
+    w.out
+}
+
+/// `USE_WITH_TARGET` (0x0035) body: `u32 sourceGuid, u32 targetGuid`. The
+/// source must be in own inventory/equipped; the target may be a landblock.
+#[must_use]
+pub fn body_use_with_target(src: u32, tgt: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(src);
+    w.u32(tgt);
+    w.out
+}
+
+/// `USE` (0x0036) body: `u32 targetGuid`. Use a world object (e.g. a vendor
+/// statue): the server resolves it in the landblock and walks to it.
+#[must_use]
+pub fn body_use(guid: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(guid);
+    w.out
+}
+
+/// `BUY` (0x005F) body: `u32 vendorGuid, u32 numItems, per item
+/// i32 amount + u32 objectId`. `objectId` is the vendor item's instance guid
+/// (the guid sent in the ApproachVendor event).
+#[must_use]
+pub fn body_buy(vendor_guid: u32, items: &[(i32, u32)]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(vendor_guid);
+    w.u32(items.len() as u32);
+    for (amount, object_id) in items {
+        w.i32(*amount);
+        w.u32(*object_id);
+    }
+    w.out
+}
+
+/// `SELL` (0x0060) body: `u32 vendorGuid, u32 numItems, per item
+/// i32 amount + u32 objectGuid` (the player inventory instance guid).
+#[must_use]
+pub fn body_sell(vendor_guid: u32, items: &[(i32, u32)]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(vendor_guid);
+    w.u32(items.len() as u32);
+    for (amount, object_guid) in items {
+        w.i32(*amount);
+        w.u32(*object_guid);
+    }
+    w.out
+}
+
+/// `OPEN_TRADE_NEGOTIATIONS` (0x01F6) body: `u32 partnerGuid`.
+#[must_use]
+pub fn body_open_trade(partner: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(partner);
+    w.out
+}
+
+/// `CLOSE_TRADE_NEGOTIATIONS` (0x01F7) body: empty.
+#[must_use]
+pub fn body_close_trade() -> Vec<u8> {
+    Vec::new()
+}
+
+/// `ADD_TO_TRADE` (0x01F8) body: `u32 itemGuid, u32 slot`.
+#[must_use]
+pub fn body_add_to_trade(item: u32, slot: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(item);
+    w.u32(slot);
+    w.out
+}
+
+/// `ACCEPT_TRADE` (0x01FA) body: 28 bytes — `i32 partnerGuid, f64 0.0,
+/// u32 0, u32 partnerGuid, u32 1, u32 1`. The server reads all six fields
+/// but only uses the partner guid.
+#[must_use]
+pub fn body_accept_trade(partner: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.i32(partner as i32);
+    w.f64(0.0);
+    w.u32(0);
+    w.u32(partner);
+    w.u32(1);
+    w.u32(1);
+    w.out
+}
+
+/// `DECLINE_TRADE` (0x01FB) body: empty.
+#[must_use]
+pub fn body_decline_trade() -> Vec<u8> {
+    Vec::new()
+}
+
+/// `RESET_TRADE` (0x0204) body: empty.
+#[must_use]
+pub fn body_reset_trade() -> Vec<u8> {
+    Vec::new()
+}
+
+/// `NO_LONGER_VIEWING_CONTENTS` (0x0195) body: `u32 containerGuid`. The
+/// server closes the ground container (S2C CloseGroundContainer follows).
+#[must_use]
+pub fn body_no_longer_viewing(guid: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(guid);
+    w.out
+}
+
+/// `FELLOWSHIP_UPDATE_REQUEST` (0x00A6) body: `u32 panelOpen (1|0)`.
+#[must_use]
+pub fn body_fellowship_update_request(open: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(u32::from(open));
+    w.out
+}
+
+/// `ALLEGIANCE_UPDATE_REQUEST` (0x001F) body: `u32 panelOpen (1|0)`. The
+/// server always replies (rank 0 + empty profile when not in one).
+#[must_use]
+pub fn body_allegiance_update_request(open: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(u32::from(open));
+    w.out
+}
+
+/// `HOUSE_QUERY` (0x021E) body: empty. The server replies with HouseData
+/// (owner) or HouseStatus (u32 weenieError, non-zero = not the owner).
+#[must_use]
+pub fn body_house_query() -> Vec<u8> {
+    Vec::new()
 }
 
 // =====================================================================
@@ -452,6 +892,35 @@ pub struct ObjectCreate {
     pub guid: u32,
     pub name: Option<String>,
     pub position: Option<Position>,
+    /// `ItemType` flag word (0 if the tail was truncated before it).
+    pub item_type: u32,
+    /// `PropertyInt` Value (0x8 WeenieHeader flag).
+    pub value: u32,
+    /// `StackSize` (0x1000 flag).
+    pub stack_size: u32,
+    /// `ItemsCapacity` (0x2 flag).
+    pub items_capacity: u32,
+    /// `ContainerId` (0x4000 flag).
+    pub container_id: u32,
+    /// `WielderId` (0x8000 flag).
+    pub wielder_id: u32,
+    /// `ValidLocations` (0x10000 flag), as an EquipMask.
+    pub valid_locs: i32,
+    /// `CurrentlyWieldedLocation` (0x20000 flag), as an EquipMask.
+    pub cur_loc: i32,
+    /// ModelData MotionTable id (PhysicsData flag 0x2).
+    pub mtable_id: Option<u32>,
+    /// ModelData Setup id (PhysicsData flag 0x1).
+    pub setup_id: Option<u32>,
+    /// ModelData model parts: (partIndex, modelId).
+    pub model_parts: Option<Vec<(usize, u32)>>,
+    /// `ObjectDescriptionFlags` bit 0x00000200 (the object is a vendor).
+    pub is_vendor: bool,
+    /// The movement section's `forward` MotionCommand (door open/close
+    /// tracking: `MOTION_CMD_DOOR_ON` / `MOTION_CMD_DOOR_OFF`).
+    pub motion_cmd: u32,
+    /// PhysicsData state word (bit 0x4 = Ethereal: door open).
+    pub physics_state: u32,
 }
 
 /// A `VectorUpdate` (0xF74E) message.
@@ -480,6 +949,24 @@ pub struct PlayerDescription {
     pub vitals: [u32; 3],
     /// Max vitals (the "starting" value): Health, Stamina, Mana.
     pub vitals_max: [u32; 3],
+    /// `PropertyInt` 20 (CoinValue), from the int table.
+    pub coin_value: i64,
+    /// Strength attribute (base + ranks).
+    pub strength: i32,
+    /// `PropertyInt` 5 (Encumbrance), from the int table.
+    pub encumbrance: i32,
+    /// (skill id, rank) from the Skill table.
+    pub skills: Vec<(u32, i32)>,
+    /// spell ids from the Spell table.
+    pub spells: Vec<u32>,
+    /// The 8 spell-bar tabs (spell ids per tab), from SpellLists8.
+    pub spell_bar: Vec<Vec<u32>>,
+    /// The spellbookFilters bitmask (one u32, always present).
+    pub spell_filters: Vec<u32>,
+    /// (item guid, containerType) from the inventory list.
+    pub inventory: Vec<(u32, u32)>,
+    /// (item guid, wieldLocation, clothingPriority) from the equipped list.
+    pub equipped: Vec<(u32, u32, u32)>,
 }
 
 /// An `AppraiseInfo` (event 0x00C9) decoded for creature health.
@@ -491,6 +978,30 @@ pub struct Appraise {
     pub health_max: u32,
     /// (PropertyInt, value)
     pub ints: Vec<(u32, i32)>,
+    /// `PropertyInt` 25 (level). None for non-creatures.
+    pub level: Option<i32>,
+    /// `PropertyInt` 19 (Value).
+    pub value: Option<i32>,
+    /// `PropertyInt` 5 (Encumbrance).
+    pub encumbrance: Option<i32>,
+    /// `PropertyInt` 107 (ItemMana) / 108 (ItemManaMax).
+    pub item_mana: Option<i32>,
+    pub item_mana_max: Option<i32>,
+    /// `PropertyInt` 33 present (Bonded).
+    pub bonded: bool,
+    /// `PropertyInt` 114 present (Attuned).
+    pub attuned: bool,
+    /// First non-empty description string (keys 16, 15, 14, 5).
+    pub description: String,
+    /// CreatureProfile (flag 0x100).
+    pub creature: Option<AppraiseCreature>,
+    /// WeaponProfile (flag 0x20).
+    pub weapon: Option<AppraiseWeapon>,
+    /// ArmorProfile (flag 0x80).
+    pub armor: Option<AppraiseArmor>,
+    /// ArmorLevels (flag 0x4000): Head, Chest, Forearms, Hands, Legs,
+    /// Feet, Shield, Cloak, TwoHanded (9 u32 values).
+    pub armor_levels: Option<[i32; 9]>,
 }
 
 /// A `TurbineChat` (0xF7DE) S2C message.
@@ -502,6 +1013,223 @@ pub struct TurbineChat {
     pub chat_type: u32,
     /// True for a server acknowledgement (NETBLOB_RESPONSE_BINARY, no text).
     pub is_ack: bool,
+}
+
+/// One entry of the `FriendsListUpdate` (0x0021) roster.
+#[derive(Clone, Debug)]
+pub struct Friend {
+    pub id: u32,
+    /// Online (0 / 1 on the wire; "appear offline" is a separate 0 field).
+    pub online: bool,
+    pub name: String,
+}
+
+/// One merchandise line of the `ApproachVendor` (0x0062) event. The item
+/// state comes from the per-item ObjectCreate-style tail; the vendor item's
+/// instance guid is that tail's guid.
+#[derive(Clone, Debug)]
+pub struct VendorItem {
+    pub guid: u32,
+    pub name: String,
+    pub item_type: u32,
+    pub value: u32,
+    /// The vendor's sell price (base value x the vendor's sell mod).
+    pub sell_price: f32,
+    /// The price the player pays (base value x the vendor's buy mod).
+    pub buy_price: f32,
+    pub stack_size: u32,
+    pub icon_id: u32,
+}
+
+/// A single `Enchantment` registry entry (60 bytes + 4 if `has_spell_set_id`
+/// is set): `u16 spellId, u16 layer, u16 spellCategory, u16 hasSpellSetId,
+/// u32 powerLevel, f64 startTime, f64 duration, u32 casterGuid,
+/// f32 degradeModifier, f32 degradeLimit, f64 lastTimeDegraded,
+/// u32 statModType, u32 statModKey, f32 statModValue, [u32 spellSetId]`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Enchantment {
+    pub spell_id: u16,
+    pub layer: u16,
+    pub spell_category: u16,
+    pub has_spell_set_id: u16,
+    pub power_level: u32,
+    pub start_time: f64,
+    pub duration: f64,
+    pub caster_guid: u32,
+    pub degrade_modifier: f32,
+    pub degrade_limit: f32,
+    pub last_time_degraded: f64,
+    pub stat_mod_type: u32,
+    pub stat_mod_key: u32,
+    pub stat_mod_value: f32,
+    pub spell_set_id: u32,
+}
+
+/// A squelch (chat filter) info block: `u32 nFilters, nFilters x u32,
+/// String16L name, u32 account`.
+#[derive(Clone, Debug, Default)]
+pub struct SquelchInfo {
+    /// Filtered chat-channel ids (e.g. 2 = General, 3 = Trade).
+    pub filters: Vec<u32>,
+    pub name: String,
+    /// Whether the entry is an account (true) or character (false).
+    pub account: bool,
+}
+
+/// A character entry of the `SetSquelchDB` (0x01F4) table: `u32 id` +
+/// a `SquelchInfo`.
+#[derive(Clone, Debug, Default)]
+pub struct SquelchEntry {
+    pub id: u32,
+    pub info: SquelchInfo,
+}
+
+/// A contract tracker row: `u32 version, u32 contractId, u32 stage,
+/// f64 timeWhenDone, f64 timeWhenRepeats`. Stage: 0 = none, 1 = Available,
+/// 2 = InProgress, 3 = DoneOrPending, 4 = Counter.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Contract {
+    pub id: u32,
+    pub version: u32,
+    pub stage: u32,
+    pub time_when_done: f64,
+    pub time_when_repeats: f64,
+}
+
+/// One allegiance member record of the `AllegianceUpdate` (0x0020) event
+/// (AllegianceData, version 0xB).
+#[derive(Clone, Debug)]
+pub struct AllegianceMember {
+    pub guid: u32,
+    pub level: u32,
+    pub rank: u16,
+    pub loyalty: u16,
+    pub leadership: u16,
+    /// The bitfield's online bit (bit 0x1 = "in game" flag 0x02).
+    pub online: bool,
+    pub name: String,
+}
+
+/// One fellow of the `FellowshipFullUpdate` (0x02BE) roster.
+#[derive(Clone, Debug)]
+pub struct Fellow {
+    pub guid: u32,
+    pub level: u32,
+    /// (max, current)
+    pub health: (u32, u32),
+    /// (max, current)
+    pub stamina: (u32, u32),
+    /// (max, current)
+    pub mana: (u32, u32),
+    pub name: String,
+}
+
+/// A house purchase/rent payment line (HouseData 0x0225): `i32 num,
+/// i32 paid, u32 weenieId, String16L name, String16L pluralName`.
+#[derive(Clone, Debug, Default)]
+pub struct HousePayment {
+    pub num: i32,
+    pub paid: i32,
+    pub weenie_id: u32,
+    pub name: String,
+    pub plural_name: String,
+}
+
+/// `AppraiseInfo` creature block (CreatureProfile, flag 0x100).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AppraiseCreature {
+    pub max_health: i32,
+    pub health: i32,
+    /// Strength, Endurance, Quickness, Coordination, Focus, Self.
+    pub attrs: [i32; 6],
+    /// Stamina, Mana, StaminaMax, ManaMax.
+    pub vitals: [i32; 4],
+}
+
+/// `AppraiseInfo` weapon block (WeaponProfile, flag 0x20).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AppraiseWeapon {
+    pub damage_min: i32,
+    /// Damage variance (the wire carries an f64; stored truncated).
+    pub damage_var: i32,
+    /// The weapon skill (e.g. 1 = Axe, 11 = Sword).
+    pub skill: u32,
+}
+
+/// `AppraiseInfo` armor block (ArmorProfile, flag 0x80): 8 f32 resist
+/// values — Slashing, Piercing, Bludgeoning, Cold, Fire, Acid, Nether,
+/// Lightning.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AppraiseArmor {
+    pub resist: [f32; 8],
+}
+
+/// `ApproachVendor` (0x0062): a vendor shop opened for the player.
+///
+/// Body (after the GameEvent prefix): `u32 vendorGuid, u32
+/// merchandiseItemTypes, u32 minValue, u32 maxValue, u32 dealMagicalItems,
+/// f32 buyPrice, f32 sellPrice, u32 altCurrencyWcid,
+/// [wcid != 0: u32 count + String16L name | u32 0 + String16L ""],
+/// u32 numItems, per item: u32 stackPrefix + u32 itemGuid + object desc
+/// tail`.
+#[derive(Clone, Debug, Default)]
+pub struct ApproachVendorInfo {
+    pub vendor_guid: u32,
+    /// `ItemType` bitmask of what the vendor buys back (sells-tab filter).
+    pub merchandise_item_types: u32,
+    pub min_value: u32,
+    pub max_value: u32,
+    /// The vendor deals in magical items too.
+    pub deal_magical_items: bool,
+    /// The vendor's BUY rate (what it pays per unit of value on a sale).
+    pub buy_price: f32,
+    /// The vendor's SELL rate (what you pay per unit of value on a buy).
+    pub sell_price: f32,
+    /// Alternate-currency wcid (0 = pyreals).
+    pub alt_currency_wcid: u32,
+    /// The player's current alternate-currency holding (0 when pyreals).
+    pub alt_currency_count: u32,
+    pub alt_currency_name: String,
+    pub items: Vec<VendorItem>,
+}
+
+/// `AllegianceUpdate` (0x0020): rank + the allegiance member hierarchy.
+#[derive(Clone, Debug, Default)]
+pub struct AllegianceUpdateInfo {
+    /// This player's rank within their allegiance (0 when not in one).
+    pub rank: u32,
+    pub total_members: u32,
+    pub total_vassals: u32,
+    pub name: String,
+    pub chat_room: u32,
+    pub locked: bool,
+    /// Monarch first, then the remaining records in tree order.
+    pub members: Vec<AllegianceMember>,
+}
+
+/// `FellowshipFullUpdate` (0x02BE): the full fellowship roster.
+#[derive(Clone, Debug, Default)]
+pub struct FellowshipFullUpdateInfo {
+    pub fellows: Vec<Fellow>,
+    pub name: String,
+    pub leader_guid: u32,
+    pub share_xp: bool,
+    pub even_share: bool,
+    pub open: bool,
+    pub locked: bool,
+}
+
+/// `HouseData` (0x0225): house panel info (retail layout).
+#[derive(Clone, Debug, Default)]
+pub struct HouseDataInfo {
+    pub dwelling_id: u32,
+    pub owner_id: u32,
+    /// 1=cottage, 2=villa, 3=mansion, 4=apartment.
+    pub house_type: u32,
+    pub maintenance_free: bool,
+    pub owner_name: String,
+    pub buy: Vec<HousePayment>,
+    pub rent: Vec<HousePayment>,
 }
 
 /// A decoded `GAME_EVENT` body.
@@ -537,6 +1265,148 @@ pub enum Event {
     },
     PingResponse,
     Unknown,
+    PopupString {
+        text: String,
+    },
+    /// `FriendsListUpdate` (0x0021).
+    FriendsListUpdate {
+        friends: Vec<Friend>,
+        update_type: u32,
+    },
+    /// `InventoryPutObjInContainer` (0x0022): item moved (or unequipped to
+    /// the main pack, when `container_guid` is the player's own guid).
+    InventoryPutObjInContainer {
+        obj_guid: u32,
+        container_guid: u32,
+        placement: u32,
+        container_type: u32,
+    },
+    /// `WieldObject` (0x0023): item equipped. `location` is the EquipMask.
+    WieldObject {
+        obj_guid: u32,
+        location: i32,
+    },
+    /// `CharacterTitle` (0x0029): current title + owned title ids.
+    CharacterTitle {
+        current: u32,
+        owned: Vec<u32>,
+    },
+    /// `InventoryPutObjectIn3D` (0x019A): item dropped to the 3D world.
+    InventoryPutObjectIn3D {
+        obj_guid: u32,
+    },
+    /// `InventoryServerSaveFailed` (0x00A0): the server failed to persist an
+    /// inventory change (u32 itemGuid, u32 WeenieError).
+    InventoryServerSaveFailed {
+        item_guid: u32,
+        code: u32,
+    },
+    /// `ApproachVendor` (0x0062): a vendor shop opened for the player.
+    ApproachVendor(ApproachVendorInfo),
+    /// `WeenieError` (0x028A): a bare error code.
+    WeenieError {
+        code: u32,
+    },
+    /// `WeenieErrorWithString` (0x028B): an error code with a message.
+    WeenieErrorWithString {
+        code: u32,
+        text: String,
+    },
+    /// `RegisterTrade` (0x01FD): a trade session started.
+    RegisterTrade {
+        initiator: u32,
+        partner: u32,
+    },
+    /// `CloseTrade` (0x01FF): the trade was closed (`reason` = WeenieError).
+    CloseTrade {
+        reason: u32,
+    },
+    /// `AddToTrade` (0x0200): an item was placed in the trade window.
+    AddToTrade {
+        item: u32,
+        side: u32,
+        slot: u32,
+    },
+    /// `RemoveFromTrade` (0x0201): an item was taken out of the trade window.
+    RemoveFromTrade {
+        item: u32,
+        side: u32,
+    },
+    /// `AcceptTrade` (0x0202): the other side accepted the trade.
+    AcceptTrade {
+        guid: u32,
+    },
+    /// `DeclineTrade` (0x0203): the other side declined the trade.
+    DeclineTrade {
+        guid: u32,
+    },
+    /// `ResetTrade` (0x0205): the trade was reset (items returned).
+    ResetTrade {
+        guid: u32,
+    },
+    /// `TradeFailure` (0x0207): a proposed trade item was rejected.
+    TradeFailure {
+        item: u32,
+        code: u32,
+    },
+    /// `ClearTradeAcceptance` (0x0208): trade acceptance state cleared.
+    ClearTradeAcceptance,
+    /// `CommunicationTransientString` (0x02EB): a transient chat string.
+    CommunicationTransientString {
+        text: String,
+    },
+    /// `MagicUpdateEnchantment` (0x02C2): one enchantment changed on self.
+    MagicUpdateEnchantment {
+        enchantment: Enchantment,
+    },
+    /// `UpdateTitle` (0x002B): a title was (un)assigned or set as display.
+    UpdateTitle {
+        title_id: u32,
+        set_as_display: bool,
+    },
+    /// `SetSquelchDB` (0x01F4): the full squelch (chat filter) state.
+    SetSquelchDB {
+        entries: Vec<SquelchEntry>,
+        global: SquelchInfo,
+    },
+    /// `SendClientContractTrackerTable` (0x0314): all tracked contracts.
+    SendClientContractTrackerTable {
+        contracts: Vec<Contract>,
+    },
+    /// `SendClientContractTracker` (0x0315): one contract tracker updated.
+    SendClientContractTracker {
+        contract: Contract,
+    },
+    /// `AllegianceUpdate` (0x0020): rank + the allegiance member hierarchy.
+    AllegianceUpdate(AllegianceUpdateInfo),
+    /// `FellowshipFullUpdate` (0x02BE): the full fellowship roster.
+    FellowshipFullUpdate(FellowshipFullUpdateInfo),
+    /// `HouseData` (0x0225): house panel info (retail layout).
+    HouseData(HouseDataInfo),
+    /// `HouseStatus` (0x0226): house query answer (u32 WeenieError).
+    HouseStatus {
+        code: u32,
+    },
+    /// `CloseGroundContainer` (0x0052): a ground container was closed.
+    CloseGroundContainer {
+        container_guid: u32,
+    },
+    /// `ViewContents` (0x0196): a ground container's contents listed.
+    ViewContents {
+        container_guid: u32,
+        /// (itemGuid, containerType)
+        items: Vec<(u32, u32)>,
+    },
+    /// `UseDone` (0x01C7): a Use / UseWithTarget finished. `text` is the
+    /// retail lock-error string for known error codes (None otherwise).
+    UseDone {
+        code: u32,
+        text: Option<String>,
+    },
+    /// `AttackDone` (0x01A7): an attack finished (u32 WeenieError).
+    AttackDone {
+        code: u32,
+    },
 }
 
 /// A fully parsed `GAME_EVENT` (0xF7B0) message.
@@ -595,6 +1465,20 @@ pub enum Incoming {
     VitalUpdate {
         vital: u32,
         value: u32,
+    },
+    /// `HearRangedSpeech` (0x02BC): out-of-earshot speech with a range.
+    HearRangedSpeech {
+        text: String,
+        sender: String,
+        sender_id: u32,
+        distance: f32,
+        chat_type: u32,
+    },
+    /// `PrivateUpdatePropertyInt` (0x02CD): a self PropertyInt update
+    /// (e.g. CoinValue after a buy/sell).
+    PrivateUpdatePropertyInt {
+        prop: u32,
+        value: i32,
     },
     /// Anything else (logged and ignored).
     Other(u32),
@@ -673,6 +1557,46 @@ pub fn parse_incoming(data: &[u8]) -> Option<Incoming> {
             let vital = r.u32();
             let value = r.u32();
             Some(Incoming::VitalUpdate { vital, value })
+        }
+        opcode::PRIVATE_UPDATE_VITAL => {
+            // u32 seq, u32 vital, u32 ranks, u32 starting, u32 xpSpent,
+            // u32 current. The server may send either this or 0x02E9.
+            if r.remaining() < 24 {
+                return Some(Incoming::Other(op));
+            }
+            r.u32(); // seq
+            let vital = r.u32();
+            r.u32(); // ranks
+            r.u32(); // starting value
+            r.u32(); // xp spent
+            let value = r.u32(); // current
+            Some(Incoming::VitalUpdate { vital, value })
+        }
+        opcode::PRIVATE_UPDATE_PROPERTY_INT => {
+            // u32 seq, u32 property, i32 value.
+            if r.remaining() < 12 {
+                return Some(Incoming::Other(op));
+            }
+            r.u32(); // seq
+            let prop = r.u32();
+            let value = r.i32();
+            Some(Incoming::PrivateUpdatePropertyInt { prop, value })
+        }
+        opcode::HEAR_RANGED_SPEECH => {
+            // String16L text, String16L sender, u32 senderID, f32 range,
+            // u32 chatType.
+            if r.remaining() < 4 {
+                return Some(Incoming::Other(op));
+            }
+            let text = r.string16l();
+            let sender = r.string16l();
+            if r.remaining() < 12 {
+                return Some(Incoming::Other(op));
+            }
+            let sender_id = r.u32();
+            let distance = r.f32();
+            let chat_type = r.u32();
+            Some(Incoming::HearRangedSpeech { text, sender, sender_id, distance, chat_type })
         }
         _ => Some(Incoming::Other(op)),
     }
@@ -807,23 +1731,239 @@ fn decode_event(event_type: u32, r: &mut Reader) -> Event {
             let chat_type = r.u32();
             Event::Tell { text, name, chat_type }
         }
+        event::POPUP_STRING => match try_string16l(r) {
+            Some(text) => Event::PopupString { text },
+            None => Event::Unknown,
+        },
+        event::FRIENDS_LIST_UPDATE => {
+            let (friends, update_type) = parse_friends_list(r);
+            Event::FriendsListUpdate { friends, update_type }
+        }
+        event::INVENTORY_PUT_OBJ_IN_CONTAINER => {
+            if r.remaining() < 16 {
+                Event::Unknown
+            } else {
+                let obj_guid = r.u32();
+                let container_guid = r.u32();
+                let placement = r.u32();
+                let container_type = r.u32();
+                Event::InventoryPutObjInContainer {
+                    obj_guid,
+                    container_guid,
+                    placement,
+                    container_type,
+                }
+            }
+        }
+        event::WIELD_OBJECT => {
+            if r.remaining() < 8 {
+                Event::Unknown
+            } else {
+                let obj_guid = r.u32();
+                let location = r.i32();
+                Event::WieldObject { obj_guid, location }
+            }
+        }
+        event::CHARACTER_TITLE => {
+            if r.remaining() < 12 {
+                Event::Unknown
+            } else {
+                r.u32(); // leading 1
+                let current = r.u32();
+                let count = r.u32() as usize;
+                if r.remaining() < count.saturating_mul(4) {
+                    Event::Unknown
+                } else {
+                    let mut owned = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        owned.push(r.u32());
+                    }
+                    Event::CharacterTitle { current, owned }
+                }
+            }
+        }
+        event::INVENTORY_PUT_OBJECT_IN_3D => {
+            if r.remaining() < 4 {
+                Event::Unknown
+            } else {
+                Event::InventoryPutObjectIn3D { obj_guid: r.u32() }
+            }
+        }
+        event::INVENTORY_SERVER_SAVE_FAILED => {
+            if r.remaining() < 8 {
+                Event::Unknown
+            } else {
+                let item_guid = r.u32();
+                let code = r.u32();
+                Event::InventoryServerSaveFailed { item_guid, code }
+            }
+        }
+        event::APPROACH_VENDOR => Event::ApproachVendor(parse_approach_vendor(r)),
+        event::WEENIE_ERROR => {
+            if r.remaining() < 4 {
+                Event::Unknown
+            } else {
+                Event::WeenieError { code: r.u32() }
+            }
+        }
+        event::WEENIE_ERROR_WITH_STRING => {
+            if r.remaining() < 4 {
+                Event::Unknown
+            } else {
+                let code = r.u32();
+                match try_string16l(r) {
+                    Some(text) => Event::WeenieErrorWithString { code, text },
+                    None => Event::WeenieError { code },
+                }
+            }
+        }
+        event::REGISTER_TRADE => {
+            if r.remaining() < 16 {
+                Event::Unknown
+            } else {
+                let initiator = r.u32();
+                let partner = r.u32();
+                r.u64(); // trailing 0
+                Event::RegisterTrade { initiator, partner }
+            }
+        }
+        event::CLOSE_TRADE => {
+            if r.remaining() < 4 {
+                Event::Unknown
+            } else {
+                Event::CloseTrade { reason: r.u32() }
+            }
+        }
+        event::ADD_TO_TRADE => {
+            if r.remaining() < 12 {
+                Event::Unknown
+            } else {
+                let item = r.u32();
+                let side = r.u32();
+                let slot = r.u32();
+                Event::AddToTrade { item, side, slot }
+            }
+        }
+        event::REMOVE_FROM_TRADE => {
+            if r.remaining() < 8 {
+                Event::Unknown
+            } else {
+                let item = r.u32();
+                let side = r.u32();
+                Event::RemoveFromTrade { item, side }
+            }
+        }
+        event::ACCEPT_TRADE => {
+            if r.remaining() < 4 {
+                Event::Unknown
+            } else {
+                Event::AcceptTrade { guid: r.u32() }
+            }
+        }
+        event::DECLINE_TRADE => {
+            if r.remaining() < 4 {
+                Event::Unknown
+            } else {
+                Event::DeclineTrade { guid: r.u32() }
+            }
+        }
+        event::RESET_TRADE => {
+            if r.remaining() < 4 {
+                Event::Unknown
+            } else {
+                Event::ResetTrade { guid: r.u32() }
+            }
+        }
+        event::TRADE_FAILURE => {
+            if r.remaining() < 8 {
+                Event::Unknown
+            } else {
+                let item = r.u32();
+                let code = r.u32();
+                Event::TradeFailure { item, code }
+            }
+        }
+        event::CLEAR_TRADE_ACCEPTANCE => Event::ClearTradeAcceptance,
+        event::COMMUNICATION_TRANSIENT_STRING => match try_string16l(r) {
+            Some(text) => Event::CommunicationTransientString { text },
+            None => Event::Unknown,
+        },
+        event::MAGIC_UPDATE_ENCHANTMENT => {
+            if r.remaining() < 60 {
+                Event::Unknown
+            } else {
+                Event::MagicUpdateEnchantment { enchantment: parse_enchantment(r) }
+            }
+        }
+        event::UPDATE_TITLE => {
+            if r.remaining() < 8 {
+                Event::Unknown
+            } else {
+                let title_id = r.u32();
+                let set_as_display = r.u32() != 0;
+                Event::UpdateTitle { title_id, set_as_display }
+            }
+        }
+        event::SET_SQUELCH_DB => {
+            let (entries, global) = parse_squelch_db(r);
+            Event::SetSquelchDB { entries, global }
+        }
+        event::SEND_CLIENT_CONTRACT_TRACKER_TABLE => {
+            Event::SendClientContractTrackerTable { contracts: parse_contract_table(r) }
+        }
+        event::SEND_CLIENT_CONTRACT_TRACKER => Event::SendClientContractTracker {
+            contract: parse_contract(r),
+        },
+        event::ALLEGIANCE_UPDATE => Event::AllegianceUpdate(parse_allegiance_update(r)),
+        event::FELLOWSHIP_FULL_UPDATE => Event::FellowshipFullUpdate(parse_fellowship_full_update(r)),
+        event::HOUSE_DATA => Event::HouseData(parse_house_data(r)),
+        event::HOUSE_STATUS => {
+            if r.remaining() < 4 {
+                Event::Unknown
+            } else {
+                Event::HouseStatus { code: r.u32() }
+            }
+        }
+        event::CLOSE_GROUND_CONTAINER => {
+            if r.remaining() < 4 {
+                Event::Unknown
+            } else {
+                Event::CloseGroundContainer { container_guid: r.u32() }
+            }
+        }
+        event::VIEW_CONTENTS => {
+            let (container_guid, items) = parse_view_contents(r);
+            Event::ViewContents { container_guid, items }
+        }
+        event::USE_DONE => {
+            if r.remaining() < 4 {
+                Event::Unknown
+            } else {
+                let code = r.u32();
+                let text = USE_DONE_TEXT
+                    .iter()
+                    .find(|(c, _)| *c == code)
+                    .map(|(_, t)| t.to_string());
+                Event::UseDone { code, text }
+            }
+        }
+        event::ATTACK_DONE => {
+            if r.remaining() < 4 {
+                Event::Unknown
+            } else {
+                Event::AttackDone { code: r.u32() }
+            }
+        }
         _ => Event::Unknown,
     }
 }
 
-/// `PlayerDescription` (0x0013) front section. Stops after the attribute
-/// and vital blocks; the variable-length tail (skills, spells, enchantments,
-/// options, inventory) is not decoded.
+/// `PlayerDescription` (0x0013): the property tables, attribute/vital
+/// blocks, and the variable-length tail (skills, spells, enchantment
+/// registry, options, spell bar, inventory, equipped). Every section is
+/// bounds-checked; a truncated message returns the partial parse so far.
 fn parse_player_description(r: &mut Reader) -> PlayerDescription {
-    let mut pd = PlayerDescription {
-        weenie_type: 0,
-        ints: Vec::new(),
-        int64s: Vec::new(),
-        strings: Vec::new(),
-        attrs: [0; 6],
-        vitals: [0; 3],
-        vitals_max: [0; 3],
-    };
+    let mut pd = PlayerDescription::default();
 
     // Back-patched property flags (written as 0 at the front, patched at the
     // end). Each property hash section is present iff its bit is set — the
@@ -927,7 +2067,131 @@ fn parse_player_description(r: &mut Reader) -> PlayerDescription {
         }
     }
 
-    pd
+    // Skills (vector flag 0x0002): PackableHashTable, 32-byte entries.
+    if vector_flags & 0x0002 != 0 {
+        let count = read_hash_header(r).0;
+        for _ in 0..count {
+            if r.remaining() < 32 {
+                break;
+            }
+            let id = r.u32();
+            let ranks = r.u16();
+            r.u16(); // always 1
+            r.u32(); // advancementClass
+            r.u32(); // xpSpent
+            r.u32(); // initLevel
+            r.u32(); // always 0
+            r.f64(); // always 0
+            pd.skills.push((id, ranks as i32));
+        }
+    }
+
+    // Spells (vector flag 0x0100): 8-byte entries.
+    if vector_flags & 0x0100 != 0 {
+        let count = read_hash_header(r).0;
+        for _ in 0..count {
+            if r.remaining() < 8 {
+                break;
+            }
+            pd.spells.push(r.u32());
+            r.f32(); // cast time
+        }
+    }
+
+    // Enchantment registry (vector flag 0x0200): mask-gated lists; the Vitae
+    // entry is not retained, so all of it is skipped.
+    if vector_flags & 0x0200 != 0 {
+        let mask = r.u32();
+        for &bit in &[0x1u32, 0x2, 0x8] {
+            if mask & bit != 0 {
+                let n = r.u32() as usize;
+                for _ in 0..n {
+                    if !skip_enchantment(r) {
+                        return finalize_pd(&mut pd);
+                    }
+                }
+            }
+        }
+        if mask & 0x4 != 0 && !skip_enchantment(r) {
+            return finalize_pd(&mut pd);
+        }
+    }
+
+    let option_flags = r.u32();
+    r.u32(); // characterOptions1
+
+    if option_flags & 0x0001 != 0 {
+        // Shortcuts: 16-byte entries.
+        let count = r.u32() as usize;
+        if !skip_section(r, count.saturating_mul(16)) {
+            return finalize_pd(&mut pd);
+        }
+    }
+    if option_flags & 0x0400 != 0 {
+        // SpellLists8 (always set by the server): 8 tabs.
+        for _ in 0..8 {
+            let count = r.u32() as usize;
+            let mut tab = Vec::with_capacity(count);
+            for _ in 0..count {
+                if r.remaining() < 4 {
+                    break;
+                }
+                tab.push(r.u32());
+            }
+            pd.spell_bar.push(tab);
+        }
+    } else {
+        r.u32();
+        for _ in 0..8 {
+            pd.spell_bar.push(Vec::new());
+        }
+    }
+    if option_flags & 0x0008 != 0 {
+        // DesiredComps: PackableHashTable, 8-byte entries.
+        if !skip_table(r, 8) {
+            return finalize_pd(&mut pd);
+        }
+    }
+    // spellbookFilters (always present).
+    pd.spell_filters.push(r.u32());
+    if option_flags & 0x0040 != 0 {
+        r.raw(4); // CharacterOptions2
+    }
+    if option_flags & 0x0200 != 0 {
+        // GameplayOptions: raw byte[] with no length prefix — it cannot be
+        // skipped reliably; stop here (inventory/equipped stay empty).
+        return finalize_pd(&mut pd);
+    }
+    let c_inv = r.u32() as usize;
+    for _ in 0..c_inv {
+        if r.remaining() < 8 {
+            break;
+        }
+        pd.inventory.push((r.u32(), r.u32()));
+    }
+    let c_eq = r.u32() as usize;
+    for _ in 0..c_eq {
+        if r.remaining() < 12 {
+            break;
+        }
+        pd.equipped.push((r.u32(), r.u32(), r.u32()));
+    }
+    finalize_pd(&mut pd)
+}
+
+/// Fill the derived PlayerDescription fields (coin_value, encumbrance,
+/// strength) from the already-parsed int table and attributes, then take the
+/// struct out of its `&mut` binding.
+fn finalize_pd(pd: &mut PlayerDescription) -> PlayerDescription {
+    for &(key, val) in &pd.ints {
+        match key {
+            20 => pd.coin_value = val as i64, // CoinValue
+            5 => pd.encumbrance = val, // Encumbrance
+            _ => {}
+        }
+    }
+    pd.strength = pd.attrs[0] as i32;
+    std::mem::take(pd)
 }
 
 /// Read a `PackableHashTable` header: `u16 count, u16 numBuckets`.
@@ -994,6 +2258,19 @@ fn parse_appraise(r: &mut Reader) -> Appraise {
             }
             None => return a,
         }
+        // Derived int fields.
+        for &(key, val) in &a.ints {
+            match key {
+                25 => a.level = Some(val), // Level
+                19 => a.value = Some(val), // Value
+                5 => a.encumbrance = Some(val), // Encumbrance
+                107 => a.item_mana = Some(val), // ItemMana
+                108 => a.item_mana_max = Some(val), // ItemManaMax
+                33 => a.bonded = true, // Bonded
+                114 => a.attuned = true, // Attuned
+                _ => {}
+            }
+        }
     }
     // Int64StatsTable (0x2000): (u32, i64)
     if flags & 0x2000 != 0 && !skip_table(r, 12) {
@@ -1014,17 +2291,25 @@ fn parse_appraise(r: &mut Reader) -> Appraise {
         }
         let count = r.u16() as usize;
         let _buckets = r.u16();
+        let mut strs: Vec<(u32, String)> = Vec::with_capacity(count);
         for _ in 0..count {
             if r.remaining() < 6 {
-                return a;
+                break;
             }
-            let _key = r.u32();
-            if r.remaining() < 2 {
-                return a;
+            let key = r.u32();
+            match try_string16l(r) {
+                Some(s) => strs.push((key, s)),
+                None => break,
             }
-            match crate::strings::read_string16l(r.buf, r.pos) {
-                Some((_, new_pos)) => r.pos = new_pos,
-                None => return a,
+        }
+        // description = first non-empty of Description(16), Biography(15),
+        // Mention(14), Name(5).
+        for &key in &[16u32, 15, 14, 5] {
+            if let Some((_, s)) = strs.iter().find(|(k, _)| *k == key) {
+                if !s.is_empty() {
+                    a.description = s.clone();
+                    break;
+                }
             }
         }
     }
@@ -1043,11 +2328,18 @@ fn parse_appraise(r: &mut Reader) -> Appraise {
         }
     }
     // ArmorProfile (0x80): 8 × f32
-    if flags & 0x80 != 0 && !skip_section(r, 32) {
-        return a;
+    if flags & 0x80 != 0 {
+        if r.remaining() < 32 {
+            return a;
+        }
+        let mut resist = [0.0f32; 8];
+        for v in resist.iter_mut() {
+            *v = r.f32();
+        }
+        a.armor = Some(AppraiseArmor { resist });
     }
     // CreatureProfile (0x100): flags, health, health_max,
-    // [0x8: 10 × u32 attributes], [0x1: 2 × u16 buff masks]
+    // [0x8: 10 × u32 attributes/vitals], [0x1: 2 × u16 buff masks]
     if flags & 0x100 != 0 {
         if r.remaining() < 12 {
             return a;
@@ -1055,16 +2347,62 @@ fn parse_appraise(r: &mut Reader) -> Appraise {
         let cflags = r.u32();
         a.health = r.u32();
         a.health_max = r.u32();
-        if cflags & 0x8 != 0 && !skip_section(r, 40) {
-            return a;
+        let mut cre = AppraiseCreature {
+            max_health: a.health_max as i32,
+            health: a.health as i32,
+            attrs: [0; 6],
+            vitals: [0; 4],
+        };
+        if cflags & 0x8 != 0 {
+            if r.remaining() < 40 {
+                return a;
+            }
+            // Str, End, Quick, Coord, Focus, Self, Stamina, Mana,
+            // StaminaMax, ManaMax.
+            let mut vals = [0u32; 10];
+            for v in vals.iter_mut() {
+                *v = r.u32();
+            }
+            cre.attrs = [
+                vals[0] as i32,
+                vals[1] as i32,
+                vals[2] as i32,
+                vals[3] as i32,
+                vals[4] as i32,
+                vals[5] as i32,
+            ];
+            cre.vitals = [
+                vals[6] as i32,
+                vals[7] as i32,
+                vals[8] as i32,
+                vals[9] as i32,
+            ];
         }
         if cflags & 0x1 != 0 && !skip_section(r, 4) {
             return a;
         }
+        a.creature = Some(cre);
     }
-    // WeaponProfile (0x20): 5 × u32 ++ 4 × f64 ++ u32 = 60 bytes
-    if flags & 0x20 != 0 && !skip_section(r, 60) {
-        return a;
+    // WeaponProfile (0x20): 4 × u32 ++ 5 × f64 ++ u32 = 60 bytes
+    if flags & 0x20 != 0 {
+        if r.remaining() < 60 {
+            return a;
+        }
+        r.u32(); // damageType
+        r.u32(); // weaponTime
+        let skill = r.u32(); // weaponSkill
+        let damage = r.u32(); // damage
+        let variance = r.f64(); // damageVariance
+        r.f64(); // damageMod
+        r.f64(); // weaponLength
+        r.f64(); // maxVelocity
+        r.f64(); // weaponOffense
+        r.u32(); // maxVelocityEstimated
+        a.weapon = Some(AppraiseWeapon {
+            damage_min: damage as i32,
+            damage_var: variance as i32,
+            skill,
+        });
     }
     // HookProfile (0x40): 3 × u32
     if flags & 0x40 != 0 && !skip_section(r, 12) {
@@ -1077,8 +2415,15 @@ fn parse_appraise(r: &mut Reader) -> Appraise {
         }
     }
     // ArmorLevels (0x4000): 9 × u32
-    if flags & 0x4000 != 0 && !skip_section(r, 36) {
-        return a;
+    if flags & 0x4000 != 0 {
+        if r.remaining() < 36 {
+            return a;
+        }
+        let mut levels = [0i32; 9];
+        for v in levels.iter_mut() {
+            *v = r.u32() as i32;
+        }
+        a.armor_levels = Some(levels);
     }
     a
 }
@@ -1123,132 +2468,662 @@ fn read_packed_string(r: &mut Reader) -> Option<String> {
 }
 
 /// `ObjectCreate` (0xF745): `u32 guid, ModelData, PhysicsData, u32
-/// weenieFlags, String16L name, ...`. Decodes the guid and, best-effort, the
-/// name and position. Returns the guid even if the tail is truncated.
+/// weenieFlags, String16L name, <description tail>`. Decodes the guid and,
+/// best-effort, the name, position, item fields (from the description tail),
+/// physics state, and the movement section's `forward` command (door state).
+/// Returns whatever was parsed even if the tail is truncated.
 fn parse_object_create(data: &[u8]) -> ObjectCreate {
+    let mut oc = ObjectCreate {
+        guid: 0,
+        name: None,
+        position: None,
+        item_type: 0,
+        value: 0,
+        stack_size: 0,
+        items_capacity: 0,
+        container_id: 0,
+        wielder_id: 0,
+        valid_locs: 0,
+        cur_loc: 0,
+        mtable_id: None,
+        setup_id: None,
+        model_parts: None,
+        is_vendor: false,
+        motion_cmd: 0,
+        physics_state: 0,
+    };
     if data.len() < 4 {
-        return ObjectCreate { guid: 0, name: None, position: None };
+        return oc;
     }
     let mut r = Reader::new(data);
-    let guid = r.u32();
+    oc.guid = r.u32();
 
-    // ModelData
-    let (name, position) = match r.remaining() {
-        n if n >= 4 => {
-            let marker = r.u8();
-            if marker == 0x11 {
-                let nsub = r.u8() as usize;
-                let ntex = r.u8() as usize;
-                let nanim = r.u8() as usize;
-                if nsub > 0 {
-                    read_packed_dword(&mut r, 0x4000000);
-                }
-                for _ in 0..nsub {
-                    read_packed_dword(&mut r, 0x4000000);
-                    r.u8();
-                    r.u8();
-                }
-                for _ in 0..ntex {
-                    r.u8();
-                    read_packed_dword(&mut r, 0x5000000);
-                    read_packed_dword(&mut r, 0x5000000);
-                }
-                for _ in 0..nanim {
-                    r.u8();
-                    read_packed_dword(&mut r, 0x1000000);
-                }
-                r.align4();
-                // PhysicsData
-                let phys = r.u32();
-                r.u32(); // state
-                let mut position = None;
-                if phys & 0x010000 != 0 {
-                    let len = r.u32() as usize;
-                    if len > 0 {
-                        r.raw(len);
-                        r.u32(); // isAutonomous
-                    }
-                }
-                if phys & 0x020000 != 0 {
-                    r.u32(); // placement
-                }
-                if phys & 0x008000 != 0 {
-                    position = Some(Position::unpack(&mut r));
-                }
-                if phys & 0x000002 != 0 {
-                    r.u32(); // MTable
-                }
-                if phys & 0x000800 != 0 {
-                    r.u32(); // STable
-                }
-                if phys & 0x001000 != 0 {
-                    r.u32(); // PeTable
-                }
-                if phys & 0x000001 != 0 {
-                    r.u32(); // CSetup
-                }
-                if phys & 0x000020 != 0 {
-                    r.u32();
-                    r.u32();
-                }
-                if phys & 0x000040 != 0 {
-                    let c = r.u32() as usize;
-                    for _ in 0..c {
-                        r.u32();
-                        r.u32();
-                    }
-                }
-                if phys & 0x000080 != 0 {
-                    r.f32();
-                }
-                if phys & 0x000100 != 0 {
-                    r.f32();
-                }
-                if phys & 0x000200 != 0 {
-                    r.f32();
-                }
-                if phys & 0x040000 != 0 {
-                    r.f32();
-                }
-                // Velocity (0x4), Acceleration (0x8), Omega (0x10) — each a
-                // single Vec3, written once by the server.
-                if phys & 0x4 != 0 {
-                    r.f32();
-                    r.f32();
-                    r.f32();
-                }
-                if phys & 0x8 != 0 {
-                    r.f32();
-                    r.f32();
-                    r.f32();
-                }
-                if phys & 0x10 != 0 {
-                    r.f32();
-                    r.f32();
-                    r.f32();
-                }
-                if phys & 0x002000 != 0 {
-                    r.u32();
-                }
-                if phys & 0x004000 != 0 {
-                    r.f32();
-                }
-                for _ in 0..9 {
-                    r.u16(); // sequence timestamps (ObjectPosition..ObjectInstance)
-                }
-                r.align4();
-                r.u32(); // weenieFlags
-                let n = r.string16l();
-                (Some(n), position)
-            } else {
-                (None, None)
+    // --- ModelData ---
+    if r.remaining() < 4 {
+        return oc;
+    }
+    let marker = r.u8();
+    if marker == 0x11 && r.remaining() >= 3 {
+        let nsub = r.u8() as usize;
+        let ntex = r.u8() as usize;
+        let nanim = r.u8() as usize;
+        if nsub > 0 {
+            read_packed_dword(&mut r, 0x4000000);
+        }
+        for _ in 0..nsub {
+            read_packed_dword(&mut r, 0x4000000);
+            r.u8();
+            r.u8();
+        }
+        for _ in 0..ntex {
+            r.u8();
+            read_packed_dword(&mut r, 0x5000000);
+            read_packed_dword(&mut r, 0x5000000);
+        }
+        let mut model_parts = Vec::with_capacity(nanim);
+        for _ in 0..nanim {
+            let part = r.u8() as usize;
+            let model = read_packed_dword(&mut r, 0x1000000);
+            model_parts.push((part, model));
+        }
+        oc.model_parts = Some(model_parts);
+        r.align4();
+        // --- PhysicsData ---
+        if r.remaining() < 8 {
+            return oc;
+        }
+        let phys = r.u32();
+        oc.physics_state = r.u32();
+        if phys & 0x010000 != 0 {
+            let len = r.u32() as usize;
+            if len > 0 {
+                oc.motion_cmd = parse_movement_forward(&mut r, len);
+                r.u32(); // isAutonomous
             }
         }
-        _ => (None, None),
+        if phys & 0x020000 != 0 {
+            r.u32(); // placement
+        }
+        if phys & 0x008000 != 0 {
+            oc.position = Some(Position::unpack(&mut r));
+        }
+        if phys & 0x000002 != 0 {
+            oc.mtable_id = Some(r.u32());
+        }
+        if phys & 0x000800 != 0 {
+            r.u32(); // STable
+        }
+        if phys & 0x001000 != 0 {
+            r.u32(); // PeTable
+        }
+        if phys & 0x000001 != 0 {
+            oc.setup_id = Some(r.u32());
+        }
+        if phys & 0x000020 != 0 {
+            r.u32();
+            r.u32();
+        }
+        if phys & 0x000040 != 0 {
+            let c = r.u32() as usize;
+            for _ in 0..c {
+                r.u32();
+                r.u32();
+            }
+        }
+        if phys & 0x000080 != 0 {
+            r.f32();
+        }
+        if phys & 0x000100 != 0 {
+            r.f32();
+        }
+        if phys & 0x000200 != 0 {
+            r.f32();
+        }
+        if phys & 0x040000 != 0 {
+            r.f32();
+        }
+        // Velocity (0x4), Acceleration (0x8), Omega (0x10) — each a single
+        // Vec3, written once by the server.
+        if phys & 0x4 != 0 {
+            r.f32();
+            r.f32();
+            r.f32();
+        }
+        if phys & 0x8 != 0 {
+            r.f32();
+            r.f32();
+            r.f32();
+        }
+        if phys & 0x10 != 0 {
+            r.f32();
+            r.f32();
+            r.f32();
+        }
+        if phys & 0x002000 != 0 {
+            r.u32();
+        }
+        if phys & 0x004000 != 0 {
+            r.f32();
+        }
+        for _ in 0..9 {
+            r.u16(); // sequence timestamps
+        }
+        r.align4();
+    }
+
+    // --- object description tail (best effort; shared with ApproachVendor) ---
+    r.align4();
+    let tail = parse_object_desc_tail(&mut r);
+    oc.name = tail.name;
+    oc.item_type = tail.item_type;
+    oc.is_vendor = tail.is_vendor;
+    oc.value = tail.value;
+    oc.stack_size = tail.stack_size;
+    oc.items_capacity = tail.items_capacity;
+    oc.container_id = tail.container_id;
+    oc.wielder_id = tail.wielder_id;
+    oc.valid_locs = tail.valid_locs;
+    oc.cur_loc = tail.cur_loc;
+    oc
+}
+
+/// Parse a single enchantment (60 fixed bytes + optional 4-byte spellSetId
+/// when `hasSpellSetId != 0`).
+fn parse_enchantment(r: &mut Reader) -> Enchantment {
+    let mut e = Enchantment::default();
+    if r.remaining() < 60 {
+        return e;
+    }
+    e.spell_id = r.u16();
+    e.layer = r.u16();
+    e.spell_category = r.u16();
+    e.has_spell_set_id = r.u16();
+    e.power_level = r.u32();
+    e.start_time = r.f64();
+    e.duration = r.f64();
+    e.caster_guid = r.u32();
+    e.degrade_modifier = r.f32();
+    e.degrade_limit = r.f32();
+    e.last_time_degraded = r.f64();
+    e.stat_mod_type = r.u32();
+    e.stat_mod_key = r.u32();
+    e.stat_mod_value = r.f32();
+    if e.has_spell_set_id != 0 {
+        if r.remaining() >= 4 {
+            e.spell_set_id = r.u32();
+        }
+    }
+    e
+}
+
+/// Skip one enchantment, returning whether it was fully present.
+fn skip_enchantment(r: &mut Reader) -> bool {
+    if r.remaining() < 60 {
+        return false;
+    }
+    let has_spell_set = u16::from_le_bytes([r.buf[r.pos + 6], r.buf[r.pos + 7]]) != 0;
+    r.raw(60);
+    if has_spell_set {
+        if r.remaining() < 4 {
+            return false;
+        }
+        r.raw(4);
+    }
+    true
+}
+
+/// `FriendsListUpdate` (0x0021): `u32 count`, per friend
+/// `u32 id, u32 online, u32 appearOffline, String16L name, u32, u32`, then
+/// `u32 updateType`.
+fn parse_friends_list(r: &mut Reader) -> (Vec<Friend>, u32) {
+    let mut friends = Vec::new();
+    let mut update_type = 0;
+    if r.remaining() < 4 {
+        return (friends, update_type);
+    }
+    let count = r.u32() as usize;
+    for _ in 0..count {
+        if r.remaining() < 12 {
+            break;
+        }
+        let id = r.u32();
+        let online = r.u32() != 0;
+        r.u32(); // appearOffline (always 0)
+        let name = match try_string16l(r) {
+            Some(n) => n,
+            None => break,
+        };
+        if r.remaining() < 8 {
+            break;
+        }
+        r.u32(); // count of this friend's friends (always 0)
+        r.u32(); // inverse count (always 0)
+        friends.push(Friend { id, online, name });
+    }
+    if r.remaining() >= 4 {
+        update_type = r.u32();
+    }
+    (friends, update_type)
+}
+
+/// `ApproachVendor` (0x0062): the vendor shop panel.
+fn parse_approach_vendor(r: &mut Reader) -> ApproachVendorInfo {
+    let mut v = ApproachVendorInfo::default();
+    if r.remaining() < 12 {
+        return v;
+    }
+    v.vendor_guid = r.u32();
+    v.merchandise_item_types = r.u32();
+    v.min_value = r.u32();
+    if r.remaining() < 12 {
+        return v;
+    }
+    v.max_value = r.u32();
+    v.deal_magical_items = r.u32() != 0;
+    v.buy_price = r.f32();
+    if r.remaining() < 12 {
+        return v;
+    }
+    v.sell_price = r.f32();
+    v.alt_currency_wcid = r.u32();
+    if v.alt_currency_wcid != 0 {
+        if r.remaining() < 4 {
+            return v;
+        }
+        v.alt_currency_count = r.u32();
+        v.alt_currency_name = try_string16l(r).unwrap_or_default();
+    } else {
+        if r.remaining() < 4 {
+            return v;
+        }
+        r.u32(); // 0
+        try_string16l(r); // ""
+    }
+    if r.remaining() < 4 {
+        return v;
+    }
+    let num_items = r.u32() as usize;
+    for _ in 0..num_items {
+        if r.remaining() < 8 {
+            break;
+        }
+        let prefix = r.u32(); // (stackSize & 0xFFFFFF) | (0xFF << 24)
+        let item_guid = r.u32();
+        let tail = parse_object_desc_tail(r);
+        let stack_raw = prefix & 0x00FF_FFFF;
+        let stack_size = if stack_raw == 0x00FF_FFFF { 1 } else { stack_raw };
+        let value = tail.value;
+        let mut vi = VendorItem {
+            guid: item_guid,
+            name: tail.name.unwrap_or_default(),
+            item_type: tail.item_type,
+            value,
+            sell_price: 0.0,
+            buy_price: 0.0,
+            stack_size,
+            icon_id: tail.icon_id,
+        };
+        // The panel displays vendor rate x base value.
+        vi.sell_price = (v.sell_price * value as f32).round();
+        vi.buy_price = (v.buy_price * value as f32).round();
+        v.items.push(vi);
+    }
+    v
+}
+
+/// One `SquelchInfo`: `u32 nFilters, nFilters x u32, String16L name, u32
+/// account`.
+fn read_squelch_info(r: &mut Reader) -> SquelchInfo {
+    let mut info = SquelchInfo::default();
+    if r.remaining() < 4 {
+        return info;
+    }
+    let n_filters = r.u32() as usize;
+    for _ in 0..n_filters {
+        if r.remaining() < 4 {
+            return info;
+        }
+        info.filters.push(r.u32());
+    }
+    match try_string16l(r) {
+        Some(n) => info.name = n,
+        None => return info,
+    }
+    if r.remaining() < 4 {
+        return info;
+    }
+    info.account = r.u32() != 0;
+    info
+}
+
+/// `SetSquelchDB` (0x01F4): `u16 accountCount(0), u16 accountBuckets(0),
+/// u16 count, u16 buckets(32), count x (u32 id + SquelchInfo), SquelchInfo
+/// (global)`.
+fn parse_squelch_db(r: &mut Reader) -> (Vec<SquelchEntry>, SquelchInfo) {
+    let mut entries = Vec::new();
+    if r.remaining() < 8 {
+        return (entries, SquelchInfo::default());
+    }
+    r.u16(); // account count (always 0)
+    r.u16(); // account buckets (always 0)
+    let count = r.u16() as usize;
+    r.u16(); // buckets (32)
+    for _ in 0..count {
+        if r.remaining() < 4 {
+            break;
+        }
+        let id = r.u32();
+        let info = read_squelch_info(r);
+        entries.push(SquelchEntry { id, info });
+    }
+    let global = read_squelch_info(r);
+    (entries, global)
+}
+
+/// One contract tracker: `u32 version, u32 contractId, u32 stage, f64
+/// timeWhenDone, f64 timeWhenRepeats`.
+fn parse_contract(r: &mut Reader) -> Contract {
+    let mut c = Contract::default();
+    if r.remaining() < 24 {
+        return c;
+    }
+    c.version = r.u32();
+    c.id = r.u32();
+    c.stage = r.u32();
+    c.time_when_done = r.f64();
+    c.time_when_repeats = r.f64();
+    c
+}
+
+/// `SendClientContractTrackerTable` (0x0314): `u16 count, u16 buckets(32),
+/// count x (u32 id + contract tracker)`.
+fn parse_contract_table(r: &mut Reader) -> Vec<Contract> {
+    let mut contracts = Vec::new();
+    if r.remaining() < 4 {
+        return contracts;
+    }
+    let count = r.u16() as usize;
+    r.u16(); // buckets (32)
+    for _ in 0..count {
+        if r.remaining() < 4 {
+            break;
+        }
+        let key = r.u32(); // contract id
+        let tracker = parse_contract(r);
+        contracts.push(Contract { id: key, ..tracker });
+    }
+    contracts
+}
+
+/// One `AllegianceData` record: guid, cpCached, cpTithed, bitfield, gender,
+/// heritage, rank, [level if bitfield & 0x8], loyalty, leadership, 8 bytes
+/// (timeOnline + age or deprecated u64), name.
+fn read_allegiance_data(r: &mut Reader) -> Option<AllegianceMember> {
+    if r.remaining() < 16 {
+        return None;
+    }
+    let guid = r.u32();
+    r.u32(); // cpCached
+    r.u32(); // cpTithed
+    let bitfield = r.u32();
+    if r.remaining() < 4 {
+        return None;
+    }
+    r.u8(); // gender
+    r.u8(); // heritage
+    let rank = r.u16();
+    let level = if bitfield & 0x8 != 0 {
+        if r.remaining() < 4 {
+            return None;
+        }
+        r.u32()
+    } else {
+        0
     };
+    if r.remaining() < 4 {
+        return None;
+    }
+    let loyalty = r.u16();
+    let leadership = r.u16();
+    if r.remaining() < 8 {
+        return None;
+    }
+    r.raw(8);
+    let name = try_string16l(r)?;
+    Some(AllegianceMember {
+        guid,
+        level,
+        rank,
+        loyalty,
+        leadership,
+        online: bitfield & 0x1 != 0,
+        name,
+    })
+}
 
+/// `AllegianceUpdate` (0x0020): the full allegiance hierarchy.
+fn parse_allegiance_update(r: &mut Reader) -> AllegianceUpdateInfo {
+    let mut a = AllegianceUpdateInfo::default();
+    if r.remaining() < 12 {
+        return a;
+    }
+    a.rank = r.u32();
+    a.total_members = r.u32();
+    a.total_vassals = r.u32();
+    if r.remaining() < 8 {
+        return a;
+    }
+    let record_count = r.u16() as usize;
+    r.u16(); // oldVersion (0xB)
+    r.u16(); // officers count (always 0)
+    r.u16(); // officers buckets (256)
+    if r.remaining() < 4 {
+        return a;
+    }
+    let titles_count = r.u32() as usize;
+    for _ in 0..titles_count {
+        if try_string16l(r).is_none() {
+            return a;
+        }
+    }
+    if r.remaining() < 16 {
+        return a;
+    }
+    r.u32(); // monarchBroadcastTime
+    r.u32(); // monarchBroadcastsToday
+    r.u32(); // spokesBroadcastTime
+    r.u32(); // spokesBroadcastsToday
+    if try_string16l(r).is_none() {
+        return a; // motd
+    }
+    if try_string16l(r).is_none() {
+        return a; // motdSetBy
+    }
+    if r.remaining() < 4 {
+        return a;
+    }
+    a.chat_room = r.u32();
+    if r.remaining() < 4 {
+        return a;
+    }
+    r.u32(); // bindpoint cell
+    if r.remaining() < 28 {
+        return a;
+    }
+    r.raw(28); // Pos (3 f32) + Rotation (4 f32)
+    match try_string16l(r) {
+        Some(n) => a.name = n,
+        None => return a,
+    }
+    if r.remaining() < 8 {
+        return a;
+    }
+    r.u32(); // nameLastSetTime
+    a.locked = r.u32() != 0;
+    if r.remaining() < 4 {
+        return a;
+    }
+    r.raw(4); // i32 approvedVassal
+    if record_count > 0 {
+        if let Some(monarch) = read_allegiance_data(r) {
+            a.members.push(monarch);
+        }
+        for _ in 1..record_count {
+            if r.remaining() < 4 {
+                break;
+            }
+            r.u32(); // parent GUID
+            match read_allegiance_data(r) {
+                Some(m) => a.members.push(m),
+                None => break,
+            }
+        }
+    }
+    a
+}
 
-    ObjectCreate { guid, name, position }
+/// `FellowshipFullUpdate` (0x02BE): the full fellowship roster.
+fn parse_fellowship_full_update(r: &mut Reader) -> FellowshipFullUpdateInfo {
+    let mut f = FellowshipFullUpdateInfo::default();
+    if r.remaining() < 4 {
+        return f;
+    }
+    let count = r.u16() as usize;
+    r.u16(); // buckets (16)
+    for _ in 0..count {
+        if r.remaining() < 44 {
+            break;
+        }
+        let guid = r.u32();
+        r.u32(); // cpCached
+        r.u32(); // lumCached
+        let level = r.u32();
+        let h_max = r.u32();
+        let s_max = r.u32();
+        let m_max = r.u32();
+        let h_cur = r.u32();
+        let s_cur = r.u32();
+        let m_cur = r.u32();
+        r.u32(); // shareLoot
+        let name = match try_string16l(r) {
+            Some(n) => n,
+            None => break,
+        };
+        f.fellows.push(Fellow {
+            guid,
+            level,
+            health: (h_max, h_cur),
+            stamina: (s_max, s_cur),
+            mana: (m_max, m_cur),
+            name,
+        });
+    }
+    match try_string16l(r) {
+        Some(n) => f.name = n,
+        None => return f,
+    }
+    if r.remaining() < 20 {
+        return f;
+    }
+    f.leader_guid = r.u32();
+    f.share_xp = r.u32() != 0;
+    f.even_share = r.u32() != 0;
+    f.open = r.u32() != 0;
+    f.locked = r.u32() != 0;
+    // DepartedMembers: u16 count u16 buckets, count x (u32 guid + i32 time).
+    if r.remaining() >= 4 {
+        let dep_count = r.u16() as usize;
+        r.u16();
+        if r.remaining() < dep_count.saturating_mul(8) {
+            return f;
+        }
+        r.raw(dep_count.saturating_mul(8));
+    }
+    // FellowshipLocks: u16 count u16 buckets, count x (String16L key + 5 u32).
+    if r.remaining() >= 4 {
+        let lock_count = r.u16() as usize;
+        r.u16();
+        for _ in 0..lock_count {
+            if try_string16l(r).is_none() {
+                return f;
+            }
+            if r.remaining() < 20 {
+                return f;
+            }
+            r.raw(20);
+        }
+    }
+    f
+}
+
+/// A house payment list: `u32 count`, each `i32 num, i32 paid, u32
+/// weenieId, String16L name, String16L pluralName`.
+fn read_house_payments(r: &mut Reader) -> Vec<HousePayment> {
+    let mut out = Vec::new();
+    if r.remaining() < 4 {
+        return out;
+    }
+    let count = r.u32() as usize;
+    for _ in 0..count {
+        if r.remaining() < 12 {
+            break;
+        }
+        let num = r.i32();
+        let paid = r.i32();
+        let weenie_id = r.u32();
+        let name = match try_string16l(r) {
+            Some(n) => n,
+            None => break,
+        };
+        let plural_name = try_string16l(r).unwrap_or_default();
+        out.push(HousePayment { num, paid, weenie_id, name, plural_name });
+    }
+    out
+}
+
+/// `HouseData` (0x0225): house panel info (retail layout).
+fn parse_house_data(r: &mut Reader) -> HouseDataInfo {
+    let mut h = HouseDataInfo::default();
+    if r.remaining() < 36 {
+        return h;
+    }
+    h.dwelling_id = r.u32();
+    h.owner_id = r.u32();
+    r.u32(); // bitmask
+    r.i32(); // minLevel
+    r.i32(); // maxLevel
+    r.i32(); // minAllegRank
+    r.i32(); // maxAllegRank
+    h.maintenance_free = r.u32() != 0;
+    h.house_type = r.u32();
+    match try_string16l(r) {
+        Some(n) => h.owner_name = n,
+        None => return h,
+    }
+    h.buy = read_house_payments(r);
+    h.rent = read_house_payments(r);
+    h
+}
+
+/// `ViewContents` (0x0196): `u32 containerGuid, u32 count, count x (u32
+/// itemGuid, u32 containerType)`.
+fn parse_view_contents(r: &mut Reader) -> (u32, Vec<(u32, u32)>) {
+    let mut items = Vec::new();
+    let mut container_guid = 0;
+    if r.remaining() < 8 {
+        return (container_guid, items);
+    }
+    container_guid = r.u32();
+    let count = r.u32() as usize;
+    for _ in 0..count {
+        if r.remaining() < 8 {
+            break;
+        }
+        let item = r.u32();
+        let ct = r.u32();
+        items.push((item, ct));
+    }
+    (container_guid, items)
 }
 
 /// Read a `WritePackedDword` value, adding back the known type.
@@ -1261,6 +3136,403 @@ fn read_packed_dword(r: &mut Reader, known_type: u32) -> u32 {
         low
     };
     base | known_type
+}
+
+/// Fields captured from the "object description" tail (the part of an
+/// ObjectCreate / per-vendor-item body after the guid, starting at
+/// `u32 weenieFlags`). Populated best-effort: `name` is `None` and the rest
+/// stay at their defaults if the tail is truncated.
+#[derive(Clone, Debug, Default)]
+struct ObjectDescTail {
+    name: Option<String>,
+    item_type: u32,
+    is_vendor: bool,
+    value: u32,
+    stack_size: u32,
+    items_capacity: u32,
+    container_id: u32,
+    wielder_id: u32,
+    valid_locs: i32,
+    cur_loc: i32,
+    icon_id: u32,
+}
+
+/// `ReadString16L` without panicking on a truncated buffer.
+fn try_string16l(r: &mut Reader) -> Option<String> {
+    if r.remaining() < 2 {
+        return None;
+    }
+    match crate::strings::read_string16l(r.buf, r.pos) {
+        Some((s, pos)) => {
+            r.pos = pos;
+            Some(s.to_string())
+        }
+        None => None,
+    }
+}
+
+/// Map a `u16` motion command to the full 32-bit `MotionCommand` id (the
+/// client stores the low 16 bits in the movement section). Unmapped,
+/// non-zero low 16 bits are treated as a full 32-bit passthrough.
+pub(crate) fn cmd_from_u16(v: u32) -> u32 {
+    match v {
+        0x0003 => 0x4100_0003, // Ready
+        0x0005 => 0x4500_0005, // WalkForward
+        0x0006 => 0x4500_0006, // WalkBackwards
+        0x0007 => 0x4400_0007, // RunForward
+        0x000d => 0x6500_000d, // TurnRight
+        0x000e => 0x6500_000e, // TurnLeft
+        0x000b => 0x4000_000b, // On (door open)
+        0x000c => 0x4000_000c, // Off (door closed)
+        0x000f => 0x6500_000f, // SideStepRight
+        0x0010 => 0x6500_0010, // SideStepLeft
+        0 => 0,
+        _ => {
+            if v & 0xffff_0000 != 0 {
+                v
+            } else {
+                0
+            }
+        }
+    }
+}
+
+/// The `forward` MotionCommand of a `len`-byte movement section (PhysicsData
+/// `Movement` flag). `r` is advanced by `len` unconditionally; the command is
+/// only meaningful for movement types 0/2 (raw/interpreted command).
+fn parse_movement_forward(r: &mut Reader, len: usize) -> u32 {
+    if r.remaining() < len {
+        r.raw(r.remaining());
+        return 0;
+    }
+    if len < 4 {
+        r.raw(len);
+        return 0;
+    }
+    let slice = r.raw(len);
+    let mut s = Reader::new(slice);
+    let mt = s.u8();
+    let mflags = s.u8();
+    if s.remaining() < 2 {
+        return 0;
+    }
+    s.u16(); // motionStyle low
+    if mt == 0 || mt == 2 {
+        if s.remaining() < 4 {
+            return 0;
+        }
+        let f = s.u32();
+        let n_cmds = (f >> 7) as usize;
+        if f & 0x1 != 0 && s.remaining() >= 2 {
+            s.u16();
+        }
+        let mut forward = 0u32;
+        if f & 0x2 != 0 {
+            if s.remaining() < 2 {
+                return 0;
+            }
+            forward = cmd_from_u16(s.u16() as u32);
+        }
+        if f & 0x4 != 0 && s.remaining() >= 2 {
+            s.u16();
+        }
+        if f & 0x8 != 0 && s.remaining() >= 2 {
+            s.u16();
+        }
+        if f & 0x10 != 0 && s.remaining() >= 4 {
+            s.f32();
+        }
+        if f & 0x20 != 0 && s.remaining() >= 4 {
+            s.f32();
+        }
+        if f & 0x40 != 0 && s.remaining() >= 4 {
+            s.f32();
+        }
+        for _ in 0..n_cmds {
+            if s.remaining() < 8 {
+                return forward;
+            }
+            s.u16();
+            s.u16();
+            s.f32();
+        }
+        s.align4();
+        if mflags & 0x1 != 0 {
+            s.u32();
+        }
+        forward
+    } else if mt == 6 || mt == 7 {
+        if mt == 6 && s.remaining() >= 4 {
+            s.u32();
+        }
+        0
+    } else {
+        0
+    }
+}
+
+/// Skip a `RestrictionDB` (HouseRestrictions flag): `u32 version, u32
+/// openStatus, u32 monarchID, u16 count, u16 numBuckets, count x (u32 guid +
+/// u32 perm)`.
+fn skip_restriction_db(r: &mut Reader) {
+    if r.remaining() < 16 {
+        return;
+    }
+    r.raw(12);
+    let count = r.u16() as usize;
+    r.u16();
+    r.raw(count.saturating_mul(8));
+}
+
+/// Parse the object description tail. `r` must be positioned at the
+/// `u32 weenieFlags` word. Consumes the ENTIRE tail (every WeenieHeaderFlag
+/// field in the server's fixed write order, the weenieFlags2 fields, and the
+/// final alignment) so the caller can advance to the next back-to-back item.
+fn parse_object_desc_tail(r: &mut Reader) -> ObjectDescTail {
+    let mut t = ObjectDescTail::default();
+    if r.remaining() < 4 {
+        return t;
+    }
+    let weenie_flags = r.u32();
+    match try_string16l(r) {
+        Some(name) => t.name = Some(name),
+        None => return t,
+    }
+    if r.remaining() < 2 {
+        return t;
+    }
+    read_packed_dword(r, 0); // WeenieClassId
+    if r.remaining() < 2 {
+        return t;
+    }
+    t.icon_id = read_packed_dword(r, 0); // IconId
+    if r.remaining() < 8 {
+        return t;
+    }
+    t.item_type = r.u32();
+    let odf = r.u32();
+    t.is_vendor = odf & 0x0000_0200 != 0;
+    r.align4();
+    let weenie_flags2 = if odf & 0x0400_0000 != 0 {
+        if r.remaining() < 4 {
+            return t;
+        }
+        r.u32()
+    } else {
+        0
+    };
+    if weenie_flags & 0x0000_0001 != 0 && try_string16l(r).is_none() {
+        return t; // PluralName
+    }
+    if weenie_flags & 0x0000_0002 != 0 {
+        if r.remaining() < 1 {
+            return t;
+        }
+        t.items_capacity = r.u8() as u32;
+    }
+    if weenie_flags & 0x0000_0004 != 0 {
+        if r.remaining() < 1 {
+            return t;
+        }
+        r.raw(1); // ContainersCapacity
+    }
+    if weenie_flags & 0x0000_0100 != 0 {
+        if r.remaining() < 2 {
+            return t;
+        }
+        r.raw(2); // AmmoType
+    }
+    if weenie_flags & 0x0000_0008 != 0 {
+        if r.remaining() < 4 {
+            return t;
+        }
+        t.value = r.u32();
+    }
+    if weenie_flags & 0x0000_0010 != 0 {
+        if r.remaining() < 4 {
+            return t;
+        }
+        r.raw(4); // Usable
+    }
+    if weenie_flags & 0x0000_0020 != 0 {
+        if r.remaining() < 4 {
+            return t;
+        }
+        r.raw(4); // UseRadius
+    }
+    if weenie_flags & 0x0008_0000 != 0 {
+        if r.remaining() < 4 {
+            return t;
+        }
+        r.raw(4); // TargetType
+    }
+    if weenie_flags & 0x0000_0080 != 0 {
+        if r.remaining() < 4 {
+            return t;
+        }
+        r.raw(4); // UiEffects
+    }
+    if weenie_flags & 0x0000_0200 != 0 {
+        if r.remaining() < 1 {
+            return t;
+        }
+        r.raw(1); // CombatUse
+    }
+    if weenie_flags & 0x0000_0400 != 0 {
+        if r.remaining() < 2 {
+            return t;
+        }
+        r.raw(2); // Structure
+    }
+    if weenie_flags & 0x0000_0800 != 0 {
+        if r.remaining() < 2 {
+            return t;
+        }
+        r.raw(2); // MaxStructure
+    }
+    if weenie_flags & 0x0000_1000 != 0 {
+        if r.remaining() < 2 {
+            return t;
+        }
+        t.stack_size = r.u16() as u32;
+    }
+    if weenie_flags & 0x0000_2000 != 0 {
+        if r.remaining() < 2 {
+            return t;
+        }
+        r.raw(2); // MaxStackSize
+    }
+    if weenie_flags & 0x0000_4000 != 0 {
+        if r.remaining() < 4 {
+            return t;
+        }
+        t.container_id = r.u32();
+    }
+    if weenie_flags & 0x0000_8000 != 0 {
+        if r.remaining() < 4 {
+            return t;
+        }
+        t.wielder_id = r.u32();
+    }
+    if weenie_flags & 0x0001_0000 != 0 {
+        if r.remaining() < 4 {
+            return t;
+        }
+        t.valid_locs = r.i32();
+    }
+    if weenie_flags & 0x0002_0000 != 0 {
+        if r.remaining() < 4 {
+            return t;
+        }
+        t.cur_loc = r.i32();
+    }
+    if weenie_flags & 0x0004_0000 != 0 {
+        if r.remaining() < 4 {
+            return t;
+        }
+        r.raw(4); // Priority
+    }
+    if weenie_flags & 0x0010_0000 != 0 {
+        if r.remaining() < 1 {
+            return t;
+        }
+        r.raw(1); // RadarBlipColor
+    }
+    if weenie_flags & 0x0080_0000 != 0 {
+        if r.remaining() < 1 {
+            return t;
+        }
+        r.raw(1); // RadarBehavior
+    }
+    if weenie_flags & 0x0800_0000 != 0 {
+        if r.remaining() < 2 {
+            return t;
+        }
+        r.raw(2); // PScript
+    }
+    if weenie_flags & 0x0100_0000 != 0 {
+        if r.remaining() < 4 {
+            return t;
+        }
+        r.raw(4); // Workmanship
+    }
+    if weenie_flags & 0x0020_0000 != 0 {
+        if r.remaining() < 2 {
+            return t;
+        }
+        r.raw(2); // Burden
+    }
+    if weenie_flags & 0x0040_0000 != 0 {
+        if r.remaining() < 2 {
+            return t;
+        }
+        r.raw(2); // Spell
+    }
+    if weenie_flags & 0x0200_0000 != 0 {
+        if r.remaining() < 4 {
+            return t;
+        }
+        r.raw(4); // HouseOwner
+    }
+    if weenie_flags & 0x0400_0000 != 0 {
+        skip_restriction_db(r); // HouseRestrictions
+    }
+    if weenie_flags & 0x2000_0000 != 0 {
+        if r.remaining() < 4 {
+            return t;
+        }
+        r.raw(4); // HookItemTypes
+    }
+    if weenie_flags & 0x0000_0040 != 0 {
+        if r.remaining() < 4 {
+            return t;
+        }
+        r.raw(4); // Monarch
+    }
+    if weenie_flags & 0x1000_0000 != 0 {
+        if r.remaining() < 2 {
+            return t;
+        }
+        r.raw(2); // HookType
+    }
+    if weenie_flags & 0x4000_0000 != 0 {
+        if r.remaining() < 2 {
+            return t;
+        }
+        read_packed_dword(r, 0); // IconOverlay
+    }
+    if weenie_flags2 & 0x01 != 0 {
+        if r.remaining() < 2 {
+            return t;
+        }
+        read_packed_dword(r, 0); // IconUnderlay
+    }
+    if weenie_flags & 0x8000_0000 != 0 {
+        if r.remaining() < 4 {
+            return t;
+        }
+        r.raw(4); // MaterialType
+    }
+    if weenie_flags2 & 0x02 != 0 {
+        if r.remaining() < 4 {
+            return t;
+        }
+        r.raw(4); // Cooldown
+    }
+    if weenie_flags2 & 0x04 != 0 {
+        if r.remaining() < 8 {
+            return t;
+        }
+        r.raw(8); // CooldownDuration
+    }
+    if weenie_flags2 & 0x08 != 0 {
+        if r.remaining() < 4 {
+            return t;
+        }
+        r.raw(4); // PetOwner
+    }
+    r.align4();
+    t
 }
 
 // =====================================================================
@@ -1654,5 +3926,618 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    /// Build a full `GAME_EVENT` message and return its decoded `Event`.
+    fn ge_event(event_type: u32, body: &[u8]) -> Event {
+        let mut w = Writer::new();
+        w.u32(opcode::GAME_EVENT);
+        w.u32(0x5000_01D0); // player guid
+        w.u32(1); // event seq
+        w.u32(event_type);
+        w.out.extend_from_slice(body);
+        let mut r = Reader::new(&w.out);
+        r.u32(); // opcode
+        parse_game_event(&mut r).expect("game event").event
+    }
+
+    #[test]
+    fn trade_action_body_layouts() {
+        // ACCEPT_TRADE is the canonical 28-byte body.
+        let b = body_accept_trade(0x0028_0200);
+        assert_eq!(b.len(), 28);
+        let mut r = Reader::new(&b);
+        assert_eq!(r.i32(), 0x0028_0200 as i32);
+        assert_eq!(r.f64(), 0.0);
+        assert_eq!(r.u32(), 0);
+        assert_eq!(r.u32(), 0x0028_0200);
+        assert_eq!(r.u32(), 1);
+        assert_eq!(r.u32(), 1);
+        assert_eq!(r.remaining(), 0);
+
+        assert_eq!(body_open_trade(7), 7u32.to_le_bytes().to_vec());
+        assert!(body_close_trade().is_empty());
+        assert!(body_decline_trade().is_empty());
+        assert!(body_reset_trade().is_empty());
+
+        let b = body_add_to_trade(0x0028_0001, 3);
+        assert_eq!(b.len(), 8);
+        let mut r = Reader::new(&b);
+        assert_eq!(r.u32(), 0x0028_0001);
+        assert_eq!(r.u32(), 3);
+
+        // BUY: vendor, count, per-item (i32 amount, u32 objectId).
+        let b = body_buy(0x0028_0100, &[(2, 0x0028_0001), (1, 0x0028_0002)]);
+        let mut r = Reader::new(&b);
+        assert_eq!(r.u32(), 0x0028_0100);
+        assert_eq!(r.u32(), 2);
+        assert_eq!(r.i32(), 2);
+        assert_eq!(r.u32(), 0x0028_0001);
+        assert_eq!(r.i32(), 1);
+        assert_eq!(r.u32(), 0x0028_0002);
+        assert_eq!(r.remaining(), 0);
+    }
+
+    #[test]
+    fn private_update_vital_02e7() {
+        let mut w = Writer::new();
+        w.u32(opcode::PRIVATE_UPDATE_VITAL);
+        w.u32(9); // seq
+        w.u32(vital::HEALTH); // vital
+        w.u32(0); // ranks
+        w.u32(100); // starting
+        w.u32(0); // xp
+        w.u32(87); // current
+        match parse_incoming(&w.out).expect("parse") {
+            Incoming::VitalUpdate { vital, value } => {
+                assert_eq!(vital, vital::HEALTH);
+                assert_eq!(value, 87);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn private_update_property_int_02cd() {
+        let mut w = Writer::new();
+        w.u32(opcode::PRIVATE_UPDATE_PROPERTY_INT);
+        w.u32(3); // seq
+        w.u32(20); // CoinValue
+        w.i32(-150); // value (a sale)
+        match parse_incoming(&w.out).expect("parse") {
+            Incoming::PrivateUpdatePropertyInt { prop, value } => {
+                assert_eq!(prop, 20);
+                assert_eq!(value, -150);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hear_ranged_speech_02bc() {
+        let mut w = Writer::new();
+        w.u32(opcode::HEAR_RANGED_SPEECH);
+        w.string16l("I can't hear you!");
+        w.string16l("Rurik");
+        w.u32(0x0028_0042);
+        w.f32(42.5);
+        w.u32(chat_type::SPEECH);
+        match parse_incoming(&w.out).expect("parse") {
+            Incoming::HearRangedSpeech { text, sender, sender_id, distance, chat_type } => {
+                assert_eq!(text, "I can't hear you!");
+                assert_eq!(sender, "Rurik");
+                assert_eq!(sender_id, 0x0028_0042);
+                assert_eq!(distance, 42.5);
+                assert_eq!(chat_type, chat_type::SPEECH);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn popup_string_event() {
+        let mut b = Writer::new();
+        b.string16l("You found 125 pyreals.");
+        let Event::PopupString { text } = ge_event(event::POPUP_STRING, &b.out) else {
+            panic!("expected PopupString");
+        };
+        assert_eq!(text, "You found 125 pyreals.");
+    }
+
+    #[test]
+    fn friends_list_event() {
+        let mut b = Writer::new();
+        b.u32(1); // count
+        b.u32(0x0028_0001); // id
+        b.u32(1); // online
+        b.u32(0); // appearOffline
+        b.string16l("Rurik");
+        b.u32(0);
+        b.u32(0);
+        b.u32(1); // updateType
+        let Event::FriendsListUpdate { friends, update_type } = ge_event(event::FRIENDS_LIST_UPDATE, &b.out) else {
+            panic!("expected FriendsListUpdate");
+        };
+        assert_eq!(update_type, 1);
+        assert_eq!(friends.len(), 1);
+        assert_eq!(friends[0].id, 0x0028_0001);
+        assert!(friends[0].online);
+        assert_eq!(friends[0].name, "Rurik");
+    }
+
+    #[test]
+    fn character_title_event() {
+        let mut b = Writer::new();
+        b.u32(1); // leading 1
+        b.u32(0); // current (None)
+        b.u32(2); // count
+        b.u32(10); // owned
+        b.u32(42); // owned
+        let Event::CharacterTitle { current, owned } = ge_event(event::CHARACTER_TITLE, &b.out) else {
+            panic!("expected CharacterTitle");
+        };
+        assert_eq!(current, 0);
+        assert_eq!(owned, vec![10, 42]);
+    }
+
+    #[test]
+    fn trade_events() {
+        let mut b = Writer::new();
+        b.u32(0x0028_0100); // initiator
+        b.u32(0x0028_0200); // partner
+        b.u64(0); // trailing 0
+        let Event::RegisterTrade { initiator, partner } = ge_event(event::REGISTER_TRADE, &b.out) else {
+            panic!("expected RegisterTrade");
+        };
+        assert_eq!(initiator, 0x0028_0100);
+        assert_eq!(partner, 0x0028_0200);
+
+        let mut b = Writer::new();
+        b.u32(0x0028_0001); // item
+        b.u32(trade_side::PARTNER); // side
+        b.u32(5); // slot
+        let Event::AddToTrade { item, side, slot } = ge_event(event::ADD_TO_TRADE, &b.out) else {
+            panic!("expected AddToTrade");
+        };
+        assert_eq!(item, 0x0028_0001);
+        assert_eq!(side, trade_side::PARTNER);
+        assert_eq!(slot, 5);
+
+        let mut b = Writer::new();
+        b.u32(0x0028_0200); // guid
+        let Event::AcceptTrade { guid } = ge_event(event::ACCEPT_TRADE, &b.out) else {
+            panic!("expected AcceptTrade");
+        };
+        assert_eq!(guid, 0x0028_0200);
+    }
+
+    #[test]
+    fn use_done_event_text() {
+        // A known lock-error code maps to the retail string.
+        let known = USE_DONE_TEXT.first().expect("non-empty table");
+        let (code, text) = known;
+        let mut b = Writer::new();
+        b.u32(*code);
+        let Event::UseDone { code: c, text: t } = ge_event(event::USE_DONE, &b.out) else {
+            panic!("expected UseDone");
+        };
+        assert_eq!(c, *code);
+        assert_eq!(t.as_deref(), Some(*text));
+
+        // Code 0 (success) has no text.
+        let mut b = Writer::new();
+        b.u32(0);
+        let Event::UseDone { code: c, text: t } = ge_event(event::USE_DONE, &b.out) else {
+            panic!("expected UseDone");
+        };
+        assert_eq!(c, 0);
+        assert!(t.is_none());
+    }
+
+    #[test]
+    fn enchantment_event() {
+        let mut b = Writer::new();
+        b.u16(0x0184); // spellId
+        b.u16(3); // layer
+        b.u16(2); // spellCategory
+        b.u16(1); // hasSpellSetId
+        b.u32(0); // powerLevel
+        b.f64(100.0); // startTime
+        b.f64(7200.0); // duration
+        b.u32(0x0028_0042); // casterGuid
+        b.f32(1.0); // degradeModifier
+        b.f32(0.0); // degradeLimit
+        b.f64(0.0); // lastTimeDegraded
+        b.u32(1); // statModType
+        b.u32(2); // statModKey
+        b.f32(1.25); // statModValue
+        b.u32(0x0001_0000); // spellSetId
+        let Event::MagicUpdateEnchantment { enchantment } = ge_event(event::MAGIC_UPDATE_ENCHANTMENT, &b.out) else {
+            panic!("expected MagicUpdateEnchantment");
+        };
+        assert_eq!(enchantment.spell_id, 0x0184);
+        assert_eq!(enchantment.layer, 3);
+        assert_eq!(enchantment.caster_guid, 0x0028_0042);
+        assert_eq!(enchantment.stat_mod_value, 1.25);
+        assert_eq!(enchantment.spell_set_id, 0x0001_0000);
+    }
+
+    #[test]
+    fn approach_vendor_event() {
+        let mut b = Writer::new();
+        b.u32(0x0028_0100); // vendorGuid
+        b.u32(0x1000); // merchandiseItemTypes
+        b.u32(0); // minValue
+        b.u32(10000); // maxValue
+        b.u32(1); // dealMagicalItems
+        b.f32(2.0); // buyPrice
+        b.f32(1.0); // sellPrice
+        b.u32(0); // altCurrencyWcid (0 = pyreals)
+        b.u32(0); // (wcid==0) count
+        b.string16l(""); // (wcid==0) name
+        b.u32(1); // numItems
+        // item: stackPrefix, itemGuid, object desc tail
+        b.u32(0xFF00_0001); // stackPrefix (stackSize 1)
+        b.u32(0x0028_0001); // itemGuid
+        b.u32(0x8); // weenieFlags (Value)
+        b.string16l("Healer Vial");
+        b.u16(1); // WeenieClassId (packed, small)
+        b.u16(0); // IconId (packed, small)
+        b.u32(0x20); // itemType
+        b.u32(0); // ODF
+        b.u32(24); // value (weenieFlags & 0x8)
+        let Event::ApproachVendor(v) = ge_event(event::APPROACH_VENDOR, &b.out) else {
+            panic!("expected ApproachVendor");
+        };
+        assert_eq!(v.vendor_guid, 0x0028_0100);
+        assert!(v.deal_magical_items);
+        assert_eq!(v.buy_price, 2.0);
+        assert_eq!(v.sell_price, 1.0);
+        assert_eq!(v.items.len(), 1);
+        let it = &v.items[0];
+        assert_eq!(it.guid, 0x0028_0001);
+        assert_eq!(it.name, "Healer Vial");
+        assert_eq!(it.value, 24);
+        assert_eq!(it.stack_size, 1);
+        assert_eq!(it.buy_price, 48.0); // 2.0 x 24
+        assert_eq!(it.sell_price, 24.0); // 1.0 x 24
+    }
+
+    #[test]
+    fn view_contents_event() {
+        let mut b = Writer::new();
+        b.u32(0x0028_0300); // containerGuid
+        b.u32(2); // count
+        b.u32(0x0028_0001);
+        b.u32(0); // containerType (item)
+        b.u32(0x0028_0002);
+        b.u32(1); // containerType (Container)
+        let Event::ViewContents { container_guid, items } = ge_event(event::VIEW_CONTENTS, &b.out) else {
+            panic!("expected ViewContents");
+        };
+        assert_eq!(container_guid, 0x0028_0300);
+        assert_eq!(items, vec![(0x0028_0001, 0), (0x0028_0002, 1)]);
+    }
+
+    #[test]
+    fn house_data_event() {
+        let mut b = Writer::new();
+        b.u32(0x0028_0400); // dwellingId
+        b.u32(0x0028_0001); // ownerId
+        b.u32(0); // bitmask
+        b.i32(0); // minLevel
+        b.i32(0); // maxLevel
+        b.i32(0); // minAllegRank
+        b.i32(0); // maxAllegRank
+        b.u32(1); // maintenanceFree
+        b.u32(3); // type (mansion)
+        b.string16l("Rurik");
+        // buy payments
+        b.u32(1); // count
+        b.i32(100); // num
+        b.i32(50); // paid
+        b.u32(0x10); // weenieId
+        b.string16l("pyreal");
+        b.string16l("pyreals");
+        // rent payments
+        b.u32(0); // count
+        let Event::HouseData(h) = ge_event(event::HOUSE_DATA, &b.out) else {
+            panic!("expected HouseData");
+        };
+        assert_eq!(h.dwelling_id, 0x0028_0400);
+        assert_eq!(h.owner_id, 0x0028_0001);
+        assert_eq!(h.house_type, 3);
+        assert!(h.maintenance_free);
+        assert_eq!(h.owner_name, "Rurik");
+        assert_eq!(h.buy.len(), 1);
+        assert_eq!(h.buy[0].num, 100);
+        assert_eq!(h.buy[0].paid, 50);
+        assert_eq!(h.buy[0].name, "pyreal");
+        assert!(h.rent.is_empty());
+    }
+
+    #[test]
+    fn fellowship_full_update_event() {
+        let mut b = Writer::new();
+        b.u16(1); // count
+        b.u16(16); // buckets
+        // one fellow: 44 fixed bytes + name
+        b.u32(0x0028_0001); // guid
+        b.u32(0); // cpCached
+        b.u32(0); // lumCached
+        b.u32(10); // level
+        b.u32(100); // hMax
+        b.u32(50); // sMax
+        b.u32(25); // mMax
+        b.u32(90); // hCur
+        b.u32(45); // sCur
+        b.u32(20); // mCur
+        b.u32(0); // shareLoot
+        b.string16l("Rurik");
+        b.string16l("The Fellowship"); // fellowshipName
+        b.u32(0x0028_0001); // leaderGuid
+        b.u32(1); // shareXP
+        b.u32(0); // evenShare
+        b.u32(1); // open
+        b.u32(0); // locked
+        b.u16(0);
+        b.u16(32); // departed members (none)
+        b.u16(0);
+        b.u16(32); // fellowship locks (none)
+        let Event::FellowshipFullUpdate(f) = ge_event(event::FELLOWSHIP_FULL_UPDATE, &b.out) else {
+            panic!("expected FellowshipFullUpdate");
+        };
+        assert_eq!(f.name, "The Fellowship");
+        assert_eq!(f.leader_guid, 0x0028_0001);
+        assert!(f.share_xp);
+        assert!(f.open);
+        assert!(!f.locked);
+        assert_eq!(f.fellows.len(), 1);
+        assert_eq!(f.fellows[0].level, 10);
+        assert_eq!(f.fellows[0].health, (100, 90));
+        assert_eq!(f.fellows[0].stamina, (50, 45));
+        assert_eq!(f.fellows[0].mana, (25, 20));
+    }
+
+    #[test]
+    fn allegiance_update_event() {
+        let mut b = Writer::new();
+        b.u32(5); // rank
+        b.u32(10); // totalMembers
+        b.u32(4); // totalVassals
+        b.u16(1); // recordCount
+        b.u16(0xB); // oldVersion
+        b.u16(0); // officers count
+        b.u16(256); // officers buckets
+        b.u32(0); // titles count
+        b.u32(0); // monarchBroadcastTime
+        b.u32(0); // monarchBroadcastsToday
+        b.u32(0); // spokesBroadcastTime
+        b.u32(0); // spokesBroadcastsToday
+        b.string16l(""); // motd
+        b.string16l(""); // motdSetBy
+        b.u32(0x100); // chatRoom
+        b.u32(0x0000_1000); // bindpoint cell
+        for _ in 0..7 {
+            b.f32(0.0); // Pos + Rotation
+        }
+        b.string16l("House of Tavi"); // allegianceName
+        b.u32(0); // nameLastSetTime
+        b.u32(0); // locked
+        b.i32(0); // approvedVassal
+        // monarch record
+        b.u32(0x0028_0001); // guid
+        b.u32(0); // cpCached
+        b.u32(0); // cpTithed
+        b.u32(0x1); // bitfield (LOGGEDIN)
+        b.u8(1); // gender
+        b.u8(0); // heritage
+        b.u16(5); // rank
+        b.u16(50); // loyalty
+        b.u16(60); // leadership
+        b.u32(0);
+        b.u32(0); // 8 bytes (no age bit)
+        b.string16l("Monarch Tavi");
+        let Event::AllegianceUpdate(a) = ge_event(event::ALLEGIANCE_UPDATE, &b.out) else {
+            panic!("expected AllegianceUpdate");
+        };
+        assert_eq!(a.rank, 5);
+        assert_eq!(a.total_members, 10);
+        assert_eq!(a.total_vassals, 4);
+        assert_eq!(a.name, "House of Tavi");
+        assert_eq!(a.chat_room, 0x100);
+        assert!(!a.locked);
+        assert_eq!(a.members.len(), 1);
+        assert_eq!(a.members[0].name, "Monarch Tavi");
+        assert_eq!(a.members[0].rank, 5);
+        assert!(a.members[0].online);
+    }
+
+    #[test]
+    fn object_create_door_motion() {
+        let mut w = Writer::new();
+        w.u32(opcode::OBJECT_CREATE);
+        w.u32(0x0028_0001); // guid
+        // ModelData
+        w.u8(0x11); // marker
+        w.u8(0); // nsub
+        w.u8(0); // ntex
+        w.u8(1); // nanim
+        w.u8(0); // part index
+        w.u16(0x1234); // packed model
+        w.align4();
+        // PhysicsData
+        w.u32(0x010000); // flags (Movement)
+        w.u32(0); // physicsState
+        w.u32(10); // movement section length
+        // movement section: mt=0, mflags=0, style, f=0x2, forward=On
+        w.u8(0);
+        w.u8(0);
+        w.u16(0);
+        w.u32(0x2);
+        w.u16(0x000b);
+        w.u32(1); // isAutonomous
+        for _ in 0..9 {
+            w.u16(0); // sequence timestamps (always written)
+        }
+        w.align4(); // server aligns before the object desc tail
+        w.u32(0); // weenieFlags
+        w.string16l("Gate");
+        w.u16(0); // WeenieClassId
+        w.u16(0); // IconId
+        w.u32(0x10); // itemType
+        w.u32(0); // ODF
+        match parse_incoming(&w.out).expect("parse") {
+            Incoming::ObjectCreate(oc) => {
+                assert_eq!(oc.guid, 0x0028_0001);
+                assert_eq!(oc.name.as_deref(), Some("Gate"));
+                assert_eq!(oc.item_type, 0x10);
+                assert_eq!(oc.motion_cmd, 0x4000_000B); // DOOR_ON
+                assert_eq!(oc.model_parts, Some(vec![(0, 0x0100_1234)]));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn player_description_tail() {
+        let mut b = Writer::new();
+        b.u32(0x0001); // propertyFlags (Int32)
+        b.u32(0x2); // weenieType
+        // Int table: encumbrance, coinValue
+        b.u16(2);
+        b.u16(4);
+        b.u32(5);
+        b.i32(100);
+        b.u32(20);
+        b.i32(500);
+        // vectorFlags (Attr|Skill|Spell) + hasHealth
+        b.u32(0x0103);
+        b.u32(1);
+        // Attribute block: all 6 attrs + 3 vitals
+        b.u32(0x1FF); // attrFlags
+        // strength: ranks 5, starting 30, xp 0
+        b.u32(5);
+        b.u32(30);
+        b.u32(0);
+        for _ in 0..5 {
+            b.u32(0);
+            b.u32(10);
+            b.u32(0);
+        }
+        for i in 0..3u32 {
+            b.u32(0); // ranks
+            b.u32(100 + i); // starting
+            b.u32(0); // xp
+            b.u32(100 + i); // current
+        }
+        // Skill table: 2 entries (32 bytes each)
+        b.u16(2);
+        b.u16(4);
+        b.u32(1); // Axe
+        b.u16(10);
+        b.u16(1);
+        b.u32(1);
+        b.u32(0);
+        b.u32(1);
+        b.u32(0);
+        b.f64(0.0);
+        b.u32(11); // Sword
+        b.u16(5);
+        b.u16(1);
+        b.u32(1);
+        b.u32(0);
+        b.u32(1);
+        b.u32(0);
+        b.f64(0.0);
+        // Spell table: 1 entry (8 bytes)
+        b.u16(1);
+        b.u16(2);
+        b.u32(10);
+        b.f32(2.0);
+        // optionFlags (SpellLists8) + characterOptions1
+        b.u32(0x0400);
+        b.u32(0);
+        // SpellLists8: 8 tabs
+        b.u32(1);
+        b.u32(10);
+        for _ in 0..7 {
+            b.u32(0);
+        }
+        b.u32(0x40); // spellFilters
+        // inventory: 1 item
+        b.u32(1);
+        b.u32(0x0028_0001);
+        b.u32(0);
+        // equipped: 1 item
+        b.u32(1);
+        b.u32(0x0028_0002);
+        b.u32(0x400);
+        b.u32(0);
+        let Event::PlayerDescription(pd) = ge_event(event::PLAYER_DESCRIPTION, &b.out) else {
+            panic!("expected PlayerDescription");
+        };
+        assert_eq!(pd.coin_value, 500);
+        assert_eq!(pd.encumbrance, 100);
+        assert_eq!(pd.strength, 30);
+        assert_eq!(pd.skills, vec![(1, 10), (11, 5)]);
+        assert_eq!(pd.spells, vec![10]);
+        assert_eq!(pd.spell_bar.len(), 8);
+        assert_eq!(pd.spell_bar[0], vec![10]);
+        assert_eq!(pd.spell_filters, vec![0x40]);
+        assert_eq!(pd.inventory, vec![(0x0028_0001, 0)]);
+        assert_eq!(pd.equipped, vec![(0x0028_0002, 0x400, 0)]);
+    }
+
+    #[test]
+    fn appraise_profiles() {
+        let mut b = Writer::new();
+        b.u32(0x0028_0042); // target guid
+        b.u32(0x40A9); // Int|String|Weapon|Armor|ArmorLevels
+        b.u32(1); // success
+        // Int table
+        b.u16(2);
+        b.u16(4);
+        b.u32(25);
+        b.i32(5);
+        b.u32(19);
+        b.i32(100);
+        // String table
+        b.u16(1);
+        b.u16(2);
+        b.u32(16);
+        b.string16l("A fine sword.");
+        // Armor profile (0x80): 8 f32
+        for i in 0..8u32 {
+            b.f32(i as f32);
+        }
+        // Weapon profile (0x20)
+        b.u32(1); // damageType
+        b.u32(10); // weaponTime
+        b.u32(11); // weaponSkill
+        b.u32(25); // damage
+        b.f64(10.0);
+        b.f64(1.0);
+        b.f64(3.0);
+        b.f64(100.0);
+        b.f64(1.5);
+        b.u32(0);
+        // ArmorLevels (0x4000): 9 u32
+        for i in 0..9u32 {
+            b.u32(i);
+        }
+        let Event::Appraise(a) = ge_event(event::IDENTIFY_OBJECT_RESPONSE, &b.out) else {
+            panic!("expected Appraise");
+        };
+        assert_eq!(a.guid, 0x0028_0042);
+        assert_eq!(a.level, Some(5));
+        assert_eq!(a.value, Some(100));
+        assert_eq!(a.description, "A fine sword.");
+        assert_eq!(a.armor.unwrap().resist, [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+        assert_eq!(
+            a.weapon.unwrap(),
+            AppraiseWeapon { damage_min: 25, damage_var: 10, skill: 11 }
+        );
+        assert_eq!(a.armor_levels.unwrap(), [0, 1, 2, 3, 4, 5, 6, 7, 8]);
     }
 }

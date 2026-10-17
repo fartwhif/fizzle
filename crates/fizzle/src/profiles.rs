@@ -17,6 +17,12 @@ pub struct Server {
 pub struct Account {
     pub name: String,
     pub password: String,
+    /// Character to auto-enter for this account (persisted on entry).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character: Option<String>,
+    /// Server name to connect to for this account (persisted on connect).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -30,6 +36,18 @@ pub struct Profiles {
     pub active_server: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_account: Option<usize>,
+    /// UI theme name: `custom` | `utf8` | `mono` | `green`.
+    #[serde(default)]
+    pub theme: String,
+    /// In-world view: `3d` (software world renderer) or `tactical` (radar).
+    #[serde(default)]
+    pub world_view: String,
+    /// Override the retail DAT directory (`$AC_DAT_DIR` / standard paths).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dat_dir: Option<String>,
+    /// Draw the 3D actor glow halos.
+    #[serde(default)]
+    pub glow_actors: bool,
 }
 
 impl Profiles {
@@ -73,7 +91,7 @@ impl Profiles {
         if let Some(i) = self.accounts.iter().position(|a| a.name == name) {
             return i;
         }
-        self.accounts.push(Account { name: name.to_string(), password: password.to_string() });
+        self.accounts.push(Account { name: name.to_string(), password: password.to_string(), character: None, server: None });
         self.accounts.len() - 1
     }
 }

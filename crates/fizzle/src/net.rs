@@ -5,8 +5,10 @@
 //! against the server's `NetworkSession`):
 //!
 //! * C2S packet `Sequence`: `LoginRequest`/`ConnectResponse` are 0, then
-//!   strictly `2, 3, 4, …` (the server's `lastReceivedPacketSequence` starts
-//!   at 1).
+//!   strictly `2, 3, 4, …` for real packets (the server's
+//!   `lastReceivedPacketSequence` starts at 1 and only real packets advance
+//!   it). PAKs (`AckSequence`) reuse the current value and never consume a
+//!   number — see `send_pak`.
 //! * C2S fragment `Sequence`: strictly `1, 2, 3, …` (per message; split
 //!   parts of one message share the message's sequence).
 //! * S2C fragments: per-message `Sequence`, split into `Count` parts ordered
@@ -15,9 +17,10 @@
 use std::collections::HashMap;
 use std::net::{UdpSocket, SocketAddr};
 use std::sync::mpsc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 
-use acproto::codec::Writer;
 use acproto::crypto::Isaac;
 use acproto::packet::{self, flags, Header, FragHeader, ParsedPacket, FRAG_HEADER_SIZE, HEADER_SIZE};
 
@@ -46,6 +49,7 @@ pub enum NetEvent {
         cookie: u64,
         net_id: u32,
         server_seed: [u8; 4],
+        iteration: u16,
     },
     /// S2C ISAAC checksum sanity check failed (logged, non-fatal).
     CryptoMismatch { expected: u32, got: u32 },
@@ -65,8 +69,10 @@ pub struct Net {
     game_port: u16,
     connect_port: u16,
     net_id: u16,
+    iteration: u16,
     c2s_seq: u32,
     c2s_frag_seq: u32,
+    max_s2c_seq: Arc<AtomicU32>,
     rx: mpsc::Receiver<NetEvent>,
     close_tx: mpsc::Sender<()>,
 }
@@ -79,17 +85,21 @@ impl Net {
         let (close_tx, close_rx) = mpsc::channel();
         let reader = socket.try_clone()?;
         reader.set_read_timeout(Some(std::time::Duration::from_millis(100)))?;
+        let max_s2c_seq = Arc::new(AtomicU32::new(0));
+        let reader_seq = max_s2c_seq.clone();
         thread::Builder::new()
             .name("fizzle-net".into())
-            .spawn(move || reader_loop(reader, tx, close_rx))?;
+            .spawn(move || reader_loop(reader, tx, close_rx, reader_seq))?;
         Ok(Self {
             socket,
             host: host.to_string(),
             game_port,
             connect_port: game_port.wrapping_add(1),
             net_id: 0,
+            iteration: 0,
             c2s_seq: 1,
             c2s_frag_seq: 0,
+            max_s2c_seq,
             rx,
             close_tx,
         })
@@ -143,8 +153,9 @@ impl Net {
     }
 
     /// `ConnectResponse` (seq 0, id = NetID) → connect port, body = u64 cookie.
-    pub fn send_connect_response(&mut self, cookie: u64, net_id: u32) -> anyhow::Result<()> {
+    pub fn send_connect_response(&mut self, cookie: u64, net_id: u32, iteration: u16) -> anyhow::Result<()> {
         self.net_id = net_id as u16;
+        self.iteration = iteration;
         self.send_connect_response_cookie(cookie)
     }
 
@@ -166,6 +177,7 @@ impl Net {
             sequence: 0,
             flags: flags::CONNECT_RESPONSE,
             id: self.net_id,
+            iteration: self.iteration,
             ..Default::default()
         };
         self.send(&packet::build_handshake(header, &body), self.connect_port)
@@ -192,6 +204,7 @@ impl Net {
             sequence: self.next_packet_seq(),
             flags: flags::BLOB_FRAGMENTS,
             id: self.net_id,
+            iteration: self.iteration,
             ..Default::default()
         };
         let fh = FragHeader {
@@ -205,22 +218,56 @@ impl Net {
         self.send(&packet::build_message_packet(header, fh, message), self.game_port)
     }
 
-    /// `EchoRequest` (flag 0x2000000 + f32 client time). Uses a packet seq.
-    ///
-    /// `client_time` should be a small, precisely-resolved seconds value
-    /// (e.g. elapsed since connect): the server's VerifyEcho compares its
-    /// delta to real time, and f32 quantization of large values (unix
-    /// epoch seconds lose ~128 s of resolution) trips the anti-speedhack.
-    pub fn send_echo_request(&mut self, client_time: f32) -> anyhow::Result<()> {
-        let mut w = Writer::new();
-        w.f32(client_time);
+    /// The highest S2C packet `Sequence` seen so far (for the PAK keepalive).
+    #[must_use]
+    pub fn max_s2c_seq(&self) -> u32 {
+        self.max_s2c_seq.load(Ordering::Relaxed)
+    }
+
+    /// Exit broadcast: `ClientNet::LogOffServer` (acclient.c:371645, 0x543EF0)
+    /// sends a bare 20-byte packet — flag `0x8000` (Disconnect), recID = NetID,
+    /// iteration = the S2C iteration, no payload, plain checksum — so the
+    /// server drops the session immediately instead of waiting out its
+    /// 15 s auth / 60 s session timeout. Retail fires it on every exit path
+    /// (`Client::CleanupNet`, 0x411D00).
+    pub fn send_disconnect(&self) -> anyhow::Result<()> {
         let header = Header {
-            sequence: self.next_packet_seq(),
-            flags: flags::ECHO_REQUEST,
+            sequence: 0,
+            flags: flags::DISCONNECT,
             id: self.net_id,
+            iteration: self.iteration,
             ..Default::default()
         };
-        self.send(&packet::build_packet(header, &w.out, &[]), self.game_port)
+        self.send(&packet::build_packet(header, &[], &[]), self.game_port)
+    }
+
+    /// Keepalive: `SharedNet::EnqueuePak` (acclient.c:371419, 0x543B10) sends an
+    /// `AckSequence` optional header (flag `0x4000`, body = highest S2C packet
+    /// sequence received) at most once per 2.0 s on every connected session.
+    /// Any valid C2S packet resets the server's session timeout
+    /// (PROTOCOL.md §13), which is what keeps an idle session alive.
+    ///
+    /// The PAK reuses `c2s_seq` (the last real-packet sequence, which equals
+    /// the server's `lastReceivedPacketSequence`) instead of consuming a new
+    /// number: the server advances `lastReceivedPacketSequence` only for
+    /// non-`AckSequence` packets (`NetworkSession.HandleOrderedPacket`), so a
+    /// PAK that consumed a number would desync the counter and leave the next
+    /// real packet ahead of `desiredSeq` — parked in `outOfOrderPackets` and
+    /// never processed. A PAK with `Sequence == lastReceivedPacketSequence`
+    /// is explicitly accepted by the server's duplicate check
+    /// (`NetworkSession.ProcessPacket`).
+    /// Returns the C2S packet sequence used.
+    pub fn send_pak(&mut self, ack: u32) -> anyhow::Result<u32> {
+        let seq = self.c2s_seq;
+        let header = Header {
+            sequence: seq,
+            flags: flags::ACK_SEQUENCE,
+            id: self.net_id,
+            iteration: self.iteration,
+            ..Default::default()
+        };
+        self.send(&packet::build_packet(header, &ack.to_le_bytes(), &[]), self.game_port)?;
+        Ok(seq)
     }
 }
 
@@ -231,7 +278,12 @@ impl Drop for Net {
 }
 
 /// The reader thread: receive, parse, reassemble, verify, and emit events.
-fn reader_loop(socket: UdpSocket, tx: mpsc::Sender<NetEvent>, close_rx: mpsc::Receiver<()>) {
+fn reader_loop(
+    socket: UdpSocket,
+    tx: mpsc::Sender<NetEvent>,
+    close_rx: mpsc::Receiver<()>,
+    max_s2c_seq: Arc<AtomicU32>,
+) {
     let mut buf = vec![0u8; 65536];
     let mut isaac: Option<Isaac> = None;
     let mut pending: HashMap<u32, FragReassembly> = HashMap::new();
@@ -250,6 +302,7 @@ fn reader_loop(socket: UdpSocket, tx: mpsc::Sender<NetEvent>, close_rx: mpsc::Re
         }
         let buf = &buf[..n];
         let header = Header::unpack(buf[..HEADER_SIZE].try_into().unwrap());
+        max_s2c_seq.fetch_max(header.sequence as u32, Ordering::Relaxed);
 
         // The ConnectRequest handshake carries a 32-byte body, not fragments.
         if header.has_flag(flags::CONNECT_REQUEST) {
@@ -262,7 +315,7 @@ fn reader_loop(socket: UdpSocket, tx: mpsc::Sender<NetEvent>, close_rx: mpsc::Re
                 // S2C encryption uses a plain ISAAC stream seeded with the
                 // server seed (no discarded first value).
                 isaac = Some(Isaac::new(&server_seed));
-                let _ = tx.send(NetEvent::ConnectRequest { server_time, cookie, net_id, server_seed });
+                let _ = tx.send(NetEvent::ConnectRequest { server_time, cookie, net_id, server_seed, iteration: header.iteration });
             }
             continue;
         }
@@ -326,5 +379,88 @@ fn reader_loop(socket: UdpSocket, tx: mpsc::Sender<NetEvent>, close_rx: mpsc::Re
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A real listener socket on an ephemeral port: `Net::connect` targets it,
+    /// so the send path is exercised end-to-end without touching a server.
+    fn capture_net() -> (Net, UdpSocket) {
+        let listener = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let net = Net::connect("127.0.0.1", port).unwrap();
+        (net, listener)
+    }
+
+    #[test]
+    fn disconnect_is_bare_20_byte_header() {
+        let (mut net, listener) = capture_net();
+        net.net_id = 7;
+        net.iteration = 3;
+        net.send_disconnect().unwrap();
+
+        let mut buf = [0u8; 64];
+        let n = listener.recv_from(&mut buf).unwrap().0;
+        assert_eq!(n, HEADER_SIZE, "Disconnect has no payload");
+        let parsed = ParsedPacket::parse(&buf[..n]).unwrap();
+        assert_eq!(parsed.header.flags, flags::DISCONNECT);
+        assert_eq!(parsed.header.sequence, 0);
+        assert_eq!(parsed.header.id, 7);
+        assert_eq!(parsed.header.iteration, 3);
+        assert_eq!(parsed.header.size, 0);
+        assert!(parsed.verify_plain());
+    }
+
+    #[test]
+    fn pak_reuses_packet_seq_without_consuming() {
+        let (net, listener) = capture_net();
+        let mut net = net;
+        net.net_id = 9;
+        net.iteration = 1;
+
+        // The first PAK reuses c2s_seq (1): the server's
+        // lastReceivedPacketSequence starts at 1 and PAKs never advance it,
+        // so the PAK must carry exactly that value.
+        let seq = net.send_pak(42).unwrap();
+        assert_eq!(seq, 1, "PAK reuses the current packet seq; no consumption");
+
+        let mut buf = [0u8; 128];
+        let n = listener.recv_from(&mut buf).unwrap().0;
+        assert_eq!(n, HEADER_SIZE + 4);
+        let parsed = ParsedPacket::parse(&buf[..n]).unwrap();
+        assert_eq!(parsed.header.flags, flags::ACK_SEQUENCE);
+        assert_eq!(parsed.header.sequence, 1);
+        assert_eq!(parsed.header.id, 9);
+        assert_eq!(parsed.header.iteration, 1);
+        assert_eq!(parsed.header.size, 4);
+        assert_eq!(parsed.optional.ack_sequence, Some(42));
+        assert!(parsed.verify_plain());
+
+        // A second PAK still carries the same sequence.
+        assert_eq!(net.send_pak(43).unwrap(), 1);
+        let n = listener.recv_from(&mut buf).unwrap().0;
+        let parsed = ParsedPacket::parse(&buf[..n]).unwrap();
+        assert_eq!(parsed.header.flags, flags::ACK_SEQUENCE);
+        assert_eq!(parsed.header.sequence, 1);
+        assert_eq!(parsed.optional.ack_sequence, Some(43));
+
+        // A real game message consumes the next packet sequence (2).
+        net.send_game_message(0xF656, &[0, 0, 0, 0]).unwrap();
+        let n = listener.recv_from(&mut buf).unwrap().0;
+        let parsed = ParsedPacket::parse(&buf[..n]).unwrap();
+        assert_eq!(parsed.header.flags, flags::BLOB_FRAGMENTS);
+        assert_eq!(parsed.header.sequence, 2);
+
+        // The PAK now follows the real packet's sequence (== the server's
+        // lastReceivedPacketSequence once it processes the message).
+        assert_eq!(net.send_pak(44).unwrap(), 2);
+        let n = listener.recv_from(&mut buf).unwrap().0;
+        let parsed = ParsedPacket::parse(&buf[..n]).unwrap();
+        assert_eq!(parsed.header.flags, flags::ACK_SEQUENCE);
+        assert_eq!(parsed.header.sequence, 2);
+        assert_eq!(parsed.optional.ack_sequence, Some(44));
     }
 }
