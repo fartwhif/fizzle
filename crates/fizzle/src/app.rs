@@ -13,7 +13,7 @@ use crate::movement::{HeldKeys, Movement, TICK};
 use crate::net::{Net, NetEvent};
 use acgeo::{World3D, WorldProbe};
 use crate::themes::Theme;
-use crate::world::{BookPage, BookState, ChatStyle, Combat, ItemState, World, ITEM_TYPE_CREATURE};
+use crate::world::{BookPage, BookState, ChatStyle, Combat, ItemState, Target, World, ITEM_TYPE_CREATURE};
 /// Auto-reconnect backoff (Stockpile parity): start 10 s, double per failed
 /// attempt, cap 5 min. A successful login resets the sequence.
 const RECONNECT_MIN_MS: u64 = 10_000;
@@ -314,11 +314,12 @@ pub struct App {
     /// A pending vendor order asked for a second Esc (retail's confirm
     /// dialog); any other input disarms it.
     pub confirm_close_vendor: bool,
-    /// The item guid selected in the item widgets (inventory / vendor /
-    /// trade / loot), plus which list it came from: 0 none, 1 inventory,
-    /// 2 vendor, 3 trade, 4 loot. The widgets' actions act on it.
-    pub item_sel: Option<u32>,
-    pub item_sel_ctx: u8,
+    /// The single unified target (a world entity or an item in a pack/shop/
+    /// trade/opened container). Exactly one thing is targeted at a time; the
+    /// status bar is the only place it is shown. Setting a world target
+    /// clears an item target and vice versa (see `set_world_target` /
+    /// `set_item_target`).
+    pub target: Option<Target>,
     /// The previous mouse click (time + cell) for double-click detection.
     pub last_click_at: Option<Instant>,
     pub last_click_pos: Option<(u16, u16)>,
@@ -411,8 +412,7 @@ impl App {
             drag: None,
             mouse_xy: None,
             confirm_close_vendor: false,
-            item_sel: None,
-            item_sel_ctx: 0,
+            target: None,
             last_click_at: None,
             last_click_pos: None,
             list_scroll: 0,
@@ -982,21 +982,19 @@ impl App {
                 }
                 // Fresh world entry: reset combat mode + target heartbeat.
                 self.world.combat = Combat::new();
-                self.world.target_guid = None;
-                self.world.target_health = None;
-                self.world.target_health_max = None;
+                self.clear_target();
                 self.last_target_health = None;
                 // Ask the server which house (if any) we own.
                 self.send_action(messages::action::HOUSE_QUERY, &messages::body_house_query());
             }
             Event::Appraise(a) => {
                 self.world.apply_appraise(&a);
-                if Some(a.guid) == self.world.target_guid {
+                if self.current_target() == Some(a.guid) {
                     self.world.target_health_max = Some(a.health_max);
                 }
             }
             Event::UpdateHealth { guid, health } => {
-                self.world.update_health_event(guid, health);
+                self.world.update_health_event(guid, health, self.current_target());
             }
             Event::DefenderNotification { attacker, damage, critical } => {
                 self.world.apply_defender(damage);
@@ -1379,12 +1377,12 @@ impl App {
         // beyond RADAR_RANGE or to another landblock) we keep it — the 3D view
         // renders the whole landblock, so a target can sit out of the 96-u radar
         // range — and only clear it if the entity has actually despawned.
-        match self.world.target_guid.and_then(|g| self.targets.iter().position(|&t| t == g)) {
+        match self.current_target().and_then(|g| self.targets.iter().position(|&t| t == g)) {
             Some(i) => self.world.target_index = i,
             None => {
-                if let Some(g) = self.world.target_guid {
+                if let Some(g) = self.current_target() {
                     if !self.world.entities.contains_key(&g) {
-                        self.world.target_guid = None;
+                        self.clear_target();
                     }
                 }
                 self.world.target_index = 0;
@@ -1405,7 +1403,7 @@ impl App {
         }
         let len = self.targets.len() as i32;
         self.world.target_index = ((self.world.target_index as i32 + dir).rem_euclid(len)) as usize;
-        self.world.target_guid = self.targets.get(self.world.target_index).copied();
+        self.set_world_target(self.targets[self.world.target_index]);
         self.appraise_current();
     }
 
@@ -1429,7 +1427,7 @@ impl App {
             .position(|g| Some(*g) != self.world.self_guid)
             .unwrap_or(0);
         self.world.target_index = idx;
-        self.world.target_guid = self.targets.get(idx).copied();
+        self.set_world_target(self.targets[idx]);
         self.appraise_current();
     }
 
@@ -1440,19 +1438,13 @@ impl App {
         // at 0 when the target drifts out of the 96-u radar range (the 3D view
         // still renders the whole landblock). A stale index would either wipe
         // a live target (the name vanishing on examine) or silently re-target
-        // the nearest entity. Callers commit target_guid to the pick first.
-        let Some(guid) = self
-            .world
-            .target_guid
-            .filter(|g| self.world.entities.contains_key(g))
+        // the nearest entity. Callers commit the target to the pick first.
+        let Some(guid) = self.current_target().filter(|g| self.world.entities.contains_key(g))
         else {
-            self.world.target_guid = None;
-            self.world.target_health = None;
-            self.world.target_health_max = None;
+            self.clear_target();
             self.world.flash = Some("no target selected".into());
             return;
         };
-        self.world.target_guid = Some(guid);
         // Seed max health from a prior appraise, if known; the Appraise
         // response below (and the heartbeat) keep it fresh.
         self.world.target_health_max = self.world.entities.get(&guid).and_then(|e| e.health_max);
@@ -1462,11 +1454,48 @@ impl App {
         self.send_action(messages::action::QUERY_HEALTH, &messages::body_query_health(guid));
     }
 
-    /// The currently targeted guid, if any. This is the stable target (tracked
-    /// by guid, not by list index, so it doesn't drift as the distance-sorted
-    /// target list reorders every tick).
+    /// The single unified target (a world entity or an item). The status bar
+    /// is the only place it is shown.
+    #[must_use]
+    pub fn target(&self) -> Option<Target> {
+        self.target
+    }
+
+    /// The targeted world entity's guid, if the current target is a world
+    /// entity. This is the stable target (tracked by guid, not by list index,
+    /// so it doesn't drift as the distance-sorted target list reorders every
+    /// tick).
+    #[must_use]
     pub fn current_target(&self) -> Option<u32> {
-        self.world.target_guid
+        match self.target {
+            Some(Target::World(g)) => Some(g),
+            _ => None,
+        }
+    }
+
+    /// Target a world entity, clearing any item target: exactly one thing is
+    /// targeted at a time.
+    pub fn set_world_target(&mut self, guid: u32) {
+        self.target = Some(Target::World(guid));
+    }
+
+    /// Target an item in a pack/shop/trade/container, clearing any world
+    /// target: exactly one thing is targeted at a time. `source` is a
+    /// `TARGET_ITEM_*` constant.
+    pub fn set_item_target(&mut self, guid: u32, source: u8) {
+        self.target = Some(Target::Item(guid, source));
+        // Drop the world-target-only state.
+        self.world.target_index = 0;
+        self.world.target_health = None;
+        self.world.target_health_max = None;
+    }
+
+    /// Clear the target (and the world-target-only state).
+    pub fn clear_target(&mut self) {
+        self.target = None;
+        self.world.target_index = 0;
+        self.world.target_health = None;
+        self.world.target_health_max = None;
     }
 
     // ---------------------------------------------------- world actions
@@ -3069,7 +3098,7 @@ impl App {
                 if let Some(g) = self.self_guid {
                     keep.push(g);
                 }
-                if let Some(t) = self.world.target_guid {
+                if let Some(t) = self.current_target() {
                     keep.push(t);
                 }
                 if self.world.trade.partner != 0 {
@@ -3092,7 +3121,7 @@ impl App {
                 self.send_action(messages::action::PING_REQUEST, &messages::body_ping_request());
                 self.last_game_ping = Some(now);
             }
-            if let Some(g) = self.world.target_guid {
+            if let Some(g) = self.current_target() {
                 if self.last_target_health.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1)) {
                     self.send_action(messages::action::QUERY_HEALTH, &messages::body_query_health(g));
                     self.last_target_health = Some(now);
@@ -3253,7 +3282,7 @@ mod tests {
         app.world.entities.insert(1, ent(1, 5.0));
         app.world.entities.insert(2, ent(2, 10.0));
         app.target_kind = 0;
-        app.world.target_guid = Some(1);
+        app.set_world_target(1);
         app.refresh_targets();
         assert_eq!(app.current_target(), Some(1));
         // Now B is closer and A farther; the list reorders to [B, A]. The
@@ -3307,7 +3336,7 @@ mod tests {
         // list, but still in the world: the refresh must keep the target.
         app.world.entities.insert(7, ent(7, 150.0));
         app.target_kind = 0;
-        app.world.target_guid = Some(7);
+        app.set_world_target(7);
         app.refresh_targets();
         assert_eq!(
             app.current_target(),
@@ -3326,7 +3355,7 @@ mod tests {
         let cell = 0x0001_0000u32;
         app.movement = Some(Movement::new(cell, Vec3 { x: 0.0, y: 0.0, z: 0.0 }));
         app.target_kind = 0;
-        app.world.target_guid = Some(7); // no entity 7 in the map: it despawned
+        app.set_world_target(7); // no entity 7 in the map: it despawned
         app.refresh_targets();
         assert_eq!(app.current_target(), None, "a despawned target must clear");
     }
@@ -3370,7 +3399,7 @@ mod tests {
         app.world.entities.insert(7, ent(7, 150.0));
         app.world.entities.insert(1, ent(1, 5.0));
         app.target_kind = 0;
-        app.world.target_guid = Some(7);
+        app.set_world_target(7);
         app.refresh_targets();
         // The refresh parks target_index at 0 (entity 1 is nearest in range).
         // Examine (appraise_current) must hold guid 7, not wipe it or retarget 1.
@@ -3531,5 +3560,52 @@ mod tests {
         assert_eq!(character_error_text(0xD), "Character already in world");
         assert_eq!(character_error_text(0x18), "Subscription expired");
         assert_eq!(character_error_text(0xFF), "Unknown error");
+    }
+
+    /// The single unified target holds exactly one thing at a time: setting a
+    /// world target clears any item target and vice versa, so the status bar
+    /// (the only render site) can never show two, and never blanks while one
+    /// is live. Regression for "targeting breaks / the name disappears".
+    #[test]
+    fn target_is_single_and_exclusive() {
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+
+        assert_eq!(app.target(), None);
+        assert_eq!(app.current_target(), None);
+
+        // Target a world entity.
+        app.set_world_target(1);
+        assert_eq!(app.target(), Some(Target::World(1)));
+        assert_eq!(app.current_target(), Some(1));
+
+        // Target an item: the world target must clear (one at a time).
+        app.set_item_target(5, crate::world::TARGET_ITEM_PACK);
+        assert_eq!(
+            app.target(),
+            Some(Target::Item(5, crate::world::TARGET_ITEM_PACK))
+        );
+        assert_eq!(
+            app.current_target(),
+            None,
+            "item target must clear the world target"
+        );
+
+        // Target a world entity again: the item target must clear.
+        app.set_world_target(2);
+        assert_eq!(app.target(), Some(Target::World(2)));
+        assert_eq!(app.current_target(), Some(2));
+
+        // A different item source still holds exactly one item target.
+        app.set_item_target(9, crate::world::TARGET_ITEM_SHOP);
+        assert_eq!(
+            app.target(),
+            Some(Target::Item(9, crate::world::TARGET_ITEM_SHOP))
+        );
+        assert_eq!(app.current_target(), None);
+
+        // Clear: nothing targeted.
+        app.clear_target();
+        assert_eq!(app.target(), None);
+        assert_eq!(app.current_target(), None);
     }
 }

@@ -26,10 +26,28 @@ use crate::app::{App, MenuView, Phase};
 use crate::themes::Theme;
 use acproto::messages::combat_mode;
 use crate::world::{
-    ChatStyle, Entity, Inventory, ItemState, VendorItem, VendorState, MAIN_PACK_CAPACITY,
-    ITEM_TYPE_CONTAINER, ITEM_TYPE_CREATURE, ITEM_TYPE_DOOR,
+    ChatStyle, Entity, Inventory, ItemState, Target, VendorItem, VendorState,
+    MAIN_PACK_CAPACITY, ITEM_TYPE_CONTAINER, ITEM_TYPE_CREATURE, ITEM_TYPE_DOOR,
+    TARGET_ITEM_CONTAINER, TARGET_ITEM_PACK, TARGET_ITEM_SHOP, TARGET_ITEM_TRADE,
 };
 use acgeo::{Actor, Camera, ReticleTarget, get_dereth_land, wrap_block_coord, ACTOR_SCALE};
+
+/// True if the single unified target is the item `guid` (in any pack / shop /
+/// trade / opened container).
+fn item_is_targeted(app: &App, guid: u32) -> bool {
+    match app.target() {
+        Some(Target::Item(g, _)) => g == guid,
+        _ => false,
+    }
+}
+
+/// The targeted item's guid, if the current target is an item.
+fn targeted_item(app: &App) -> Option<u32> {
+    match app.target() {
+        Some(Target::Item(g, _)) => Some(g),
+        _ => None,
+    }
+}
 
 // ================================================================== constants
 
@@ -1094,7 +1112,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, w: u16) {
 /// The status-bar target readout: the selected item's name (never a raw
 /// guid) or the current world target's name + vital, or `(none)`.
 fn target_readout(app: &App) -> String {
-    if let Some(guid) = app.item_sel {
+    if let Some(guid) = targeted_item(app) {
         return item_name(app, guid);
     }
     match app.current_target() {
@@ -1611,7 +1629,7 @@ fn draw_inventory(f: &mut Frame, app: &App, x0: u16, y0: u16, rows: usize, inner
             .to_string(),
             None => "·".to_string(),
         };
-        let sel = guid.is_some() && app.item_sel == guid;
+        let sel = matches!(guid, Some(g) if item_is_targeted(app, g));
         put(f, y0 + 1 + r, x0 + 1 + c, &glyph, if sel { reverse(app) } else { normal(app) });
     }
     // Pack grid: header row 5, grid from row 6, icon column at the far right.
@@ -1636,7 +1654,7 @@ fn draw_inventory(f: &mut Frame, app: &App, x0: u16, y0: u16, rows: usize, inner
             } else {
                 "·".to_string()
             };
-            let sel = idx < used && app.item_sel == Some(inv.pack[idx].guid);
+            let sel = idx < used && item_is_targeted(app, inv.pack[idx].guid);
             put(
                 f,
                 y0 + 1 + INV_GRID_R0 + r as u16,
@@ -2286,7 +2304,7 @@ fn vendor_list_segs(app: &App) -> Vec<Seg> {
     for it in &page.items {
         let listed =
             app.world.vendor.tab == 2 && app.world.vendor.selling.iter().any(|(g, _)| *g == it.guid);
-        let sel = app.item_sel == Some(it.guid) || listed;
+        let sel = item_is_targeted(app, it.guid) || listed;
         let amt = if it.amount > 1 {
             format!(" x{}", it.amount)
         } else {
@@ -2312,8 +2330,7 @@ fn vendor_list_segs(app: &App) -> Vec<Seg> {
 fn vendor_summary_segs(app: &App) -> Vec<Seg> {
     let v = &app.world.vendor;
     if v.tab == 0 {
-        let it_price = app
-            .item_sel
+        let it_price = targeted_item(app)
             .and_then(|g| vendor_list(app).iter().find(|x| x.guid == g).map(|x| x.price));
         return match it_price {
             Some(price) => vec![seg(&format!("cost: {}p each", commas(price)), SegStyle::Focus)],
@@ -2445,7 +2462,7 @@ fn draw_vendor(f: &mut Frame, app: &mut App, lb: WLayout) {
     let inner_w = lb.left_w - 2;
     let inner_x: u16 = 1;
     // Keep the unified target inside the list row's page (retail ScrollToShow).
-    if let Some(guid) = app.item_sel {
+    if let Some(guid) = targeted_item(app) {
         let list = vendor_list(app);
         if let Some(idx) = list.iter().position(|x| x.guid == guid) {
             let max_start = list.len().saturating_sub(VENDOR_LIST_PAGE);
@@ -2507,8 +2524,7 @@ fn vendor_press(app: &mut App, lb: WLayout, r: u16, c: u16) {
                     continue;
                 };
                 if c >= a && c < b {
-                    app.item_sel = Some(it.guid);
-                    app.item_sel_ctx = 2;
+                    app.set_item_target(it.guid, TARGET_ITEM_SHOP);
                     app.world.vendor.sel = i;
                     return;
                 }
@@ -2638,7 +2654,7 @@ fn vendor_button_action(app: &mut App, i: usize) {
 
 /// Items [Buy]: buy one of the targeted stock item now.
 fn vendor_buy_one(app: &mut App) {
-    let guid = match app.item_sel {
+    let guid = match targeted_item(app) {
         Some(g) => g,
         None => {
             app.world.flash = Some("nothing to buy".into());
@@ -2667,7 +2683,7 @@ fn vendor_buy_one(app: &mut App) {
 /// Items [Add]: stage one more of the targeted stock item on the buy order
 /// (5000 max per entry).
 fn vendor_add_to_buy(app: &mut App) {
-    let guid = match app.item_sel {
+    let guid = match targeted_item(app) {
         Some(g) => g,
         None => {
             app.world.flash = Some("nothing to add".into());
@@ -2703,7 +2719,7 @@ fn vendor_buy_entry(app: &mut App) {
         app.world.flash = Some("buy list empty".into());
         return;
     }
-    let guid = match app.item_sel {
+    let guid = match targeted_item(app) {
         Some(g) if app.world.vendor.buying.iter().any(|(x, _)| *x == g) => g,
         _ => {
             app.world.flash = Some("target a buy entry first (click it)".into());
@@ -2766,7 +2782,7 @@ fn vendor_remove_buy(app: &mut App) {
         app.world.flash = Some("buy list empty".into());
         return;
     }
-    let guid = match app.item_sel {
+    let guid = match targeted_item(app) {
         Some(g) if app.world.vendor.buying.iter().any(|(x, _)| *x == g) => g,
         _ => {
             app.world.flash = Some("target a buy entry first (click it)".into());
@@ -2797,7 +2813,7 @@ fn vendor_clear_buy(app: &mut App) {
 
 /// Sell [Add]: list one stack of the targeted pack item for sale.
 fn vendor_add_to_sell(app: &mut App) {
-    let guid = match app.item_sel {
+    let guid = match targeted_item(app) {
         Some(g) => g,
         None => {
             app.world.flash = Some("nothing to sell".into());
@@ -2828,7 +2844,7 @@ fn vendor_sell_entry(app: &mut App) {
         app.world.flash = Some("sell list empty".into());
         return;
     }
-    let guid = match app.item_sel {
+    let guid = match targeted_item(app) {
         Some(g) if app.world.vendor.selling.iter().any(|(x, _)| *x == g) => g,
         _ => {
             app.world.flash = Some("target a listed item first (click it)".into());
@@ -2880,7 +2896,7 @@ fn vendor_remove_sell(app: &mut App) {
         app.world.flash = Some("sell list empty".into());
         return;
     }
-    let guid = match app.item_sel {
+    let guid = match targeted_item(app) {
         Some(g) if app.world.vendor.selling.iter().any(|(x, _)| *x == g) => g,
         _ => {
             app.world.flash = Some("target a listed item first (click it)".into());
@@ -2927,7 +2943,7 @@ fn draw_trade(f: &mut Frame, app: &App, lb: WLayout) {
             y + 1,
             col,
             &item_glyph_of_guid(app, guid).to_string(),
-            if app.item_sel == Some(guid) {
+            if item_is_targeted(app, guid) {
                 reverse(app)
             } else {
                 normal(app)
@@ -2946,7 +2962,7 @@ fn draw_trade(f: &mut Frame, app: &App, lb: WLayout) {
             y + 3,
             col,
             &item_glyph_of_guid(app, guid).to_string(),
-            if app.item_sel == Some(guid) {
+            if item_is_targeted(app, guid) {
                 reverse(app)
             } else {
                 normal(app)
@@ -2998,7 +3014,7 @@ fn trade_press(app: &mut App, lb: WLayout, r: u16, c: u16) {
         };
         match i {
             0 => {
-                let Some(item) = app.item_sel else {
+                let Some(item) = targeted_item(app) else {
                     app.world.flash = Some("target an item first (click it in the pack)".into());
                     return;
                 };
@@ -3026,8 +3042,7 @@ fn trade_press(app: &mut App, lb: WLayout, r: u16, c: u16) {
         return;
     }
     if let Some((guid, i)) = trade_item_at(app, lb, r, c) {
-        app.item_sel = Some(guid);
-        app.item_sel_ctx = 3;
+        app.set_item_target(guid, TARGET_ITEM_TRADE);
         app.world.trade.sel = i;
     }
 }
@@ -3057,7 +3072,7 @@ fn draw_loot(f: &mut Frame, app: &App, lb: WLayout) {
             y + 2,
             col,
             &item_glyph(it.item_type).to_string(),
-            if app.item_sel == Some(it.guid) {
+            if item_is_targeted(app, it.guid) {
                 reverse(app)
             } else {
                 normal(app)
@@ -3065,7 +3080,7 @@ fn draw_loot(f: &mut Frame, app: &App, lb: WLayout) {
         );
         col += 2;
     }
-    if let Some(g) = app.item_sel {
+    if let Some(g) = targeted_item(app) {
         if let Some(it) = cont.items.iter().find(|i| i.guid == g) {
             put(
                 f,
@@ -3120,7 +3135,7 @@ fn loot_press(app: &mut App, lb: WLayout, r: u16, c: u16) {
         };
         match i {
             0 => {
-                let Some(item) = app.item_sel else {
+                let Some(item) = targeted_item(app) else {
                     app.world.flash = Some("click an item in the box first".into());
                     return;
                 };
@@ -3148,8 +3163,7 @@ fn loot_press(app: &mut App, lb: WLayout, r: u16, c: u16) {
         return;
     }
     if let Some((guid, i)) = loot_item_at(app, lb, r, c) {
-        app.item_sel = Some(guid);
-        app.item_sel_ctx = 4;
+        app.set_item_target(guid, TARGET_ITEM_CONTAINER);
         app.world.container.sel = i;
     }
 }
@@ -3510,7 +3524,7 @@ fn target_kind_for(app: &App, guid: u32) -> u8 {
 fn set_target_by_guid(app: &mut App, guid: u32) {
     app.target_kind = target_kind_for(app, guid);
     app.refresh_targets();
-    app.world.target_guid = Some(guid);
+    app.set_world_target(guid);
     match app.targets.iter().position(|&g| g == guid) {
         Some(i) => app.world.target_index = i,
         None => app.world.flash = Some("out of range".into()),
@@ -3527,8 +3541,7 @@ fn left_down(app: &mut App, area: Rect, r: u16, c: u16) {
     // Inventory item: start a drag + target it.
     if let Some((guid, slot)) = inv_item_at(app, lb, r, c, area.width) {
         app.drag = Some(guid);
-        app.item_sel = Some(guid);
-        app.item_sel_ctx = 1;
+        app.set_item_target(guid, TARGET_ITEM_PACK);
         match slot {
             InvSlot::Pack(i) => app.world.inventory.sel = i,
             InvSlot::Doll(i) => app.world.inventory.doll_sel = i,
@@ -3564,7 +3577,7 @@ fn left_down(app: &mut App, area: Rect, r: u16, c: u16) {
     if r >= lb.world_y0 + 1 && r <= lb.world_y1 - 2 && c >= 1 && c <= lb.left_w - 2 {
         if let Some(guid) = pick_world_at(app, lb, r, c) {
             set_target_by_guid(app, guid);
-            // Commit the target (target_guid) — set_target_by_guid only points
+            // Commit the target — set_target_by_guid only points
             // the index; appraise_current sends the server query so the status
             // bar and reticle lock onto the clicked entity.
             app.appraise_current();
@@ -3752,32 +3765,28 @@ fn right_down(app: &mut App, area: Rect, r: u16, c: u16) {
         return;
     };
     if let Some((guid, _slot)) = inv_item_at(app, lb, r, c, area.width) {
-        app.item_sel = Some(guid);
-        app.item_sel_ctx = 1;
+        app.set_item_target(guid, TARGET_ITEM_PACK);
         app.identify_item(guid);
         app.multi_sel = EXAMINE_WIDGET;
         app.list_scroll = 0;
         return;
     }
     if let Some((guid, _i)) = trade_item_at(app, lb, r, c) {
-        app.item_sel = Some(guid);
-        app.item_sel_ctx = 3;
+        app.set_item_target(guid, TARGET_ITEM_TRADE);
         app.identify_item(guid);
         app.multi_sel = EXAMINE_WIDGET;
         app.list_scroll = 0;
         return;
     }
     if let Some(guid) = vendor_item_at(app, lb, r, c) {
-        app.item_sel = Some(guid);
-        app.item_sel_ctx = 2;
+        app.set_item_target(guid, TARGET_ITEM_SHOP);
         app.identify_item(guid);
         app.multi_sel = EXAMINE_WIDGET;
         app.list_scroll = 0;
         return;
     }
     if let Some((guid, _i)) = loot_item_at(app, lb, r, c) {
-        app.item_sel = Some(guid);
-        app.item_sel_ctx = 4;
+        app.set_item_target(guid, TARGET_ITEM_CONTAINER);
         app.identify_item(guid);
         app.multi_sel = EXAMINE_WIDGET;
         app.list_scroll = 0;

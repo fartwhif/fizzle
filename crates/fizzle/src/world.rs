@@ -26,6 +26,24 @@ pub const ITEM_TYPE_DOOR: u32 = 128;
 pub const ITEM_TYPE_CONTAINER: u32 = 512;
 /// Item type for a Creature (retail `ItemType::Creature` = 16).
 pub const ITEM_TYPE_CREATURE: u32 = 16;
+
+/// The single unified target: exactly one thing is targeted at a time — a
+/// world entity or an item in a pack/shop/trade/opened container. It is
+/// shown in exactly one place (the status bar).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// A world entity (creature, door, container, ground item, player).
+    World(u32),
+    /// An item: `(guid, source)` where `source` is one of the
+    /// `TARGET_ITEM_*` constants.
+    Item(u32, u8),
+}
+
+/// The source list of a targeted item (`Target::Item`'s `source`).
+pub const TARGET_ITEM_PACK: u8 = 1;
+pub const TARGET_ITEM_SHOP: u8 = 2;
+pub const TARGET_ITEM_TRADE: u8 = 3;
+pub const TARGET_ITEM_CONTAINER: u8 = 4;
 /// Main pack capacity (retail).
 pub const MAIN_PACK_CAPACITY: usize = 102;
 
@@ -438,8 +456,6 @@ pub struct World {
     pub container: ContainerState,
     /// Combat/stance/height/power state.
     pub combat: Combat,
-    /// The currently targeted entity's guid (mirrors `targets[target_index]`).
-    pub target_guid: Option<u32>,
     /// Live target health (from the `QueryHealth`/`UpdateHealth` heartbeat).
     pub target_health: Option<u32>,
     pub target_health_max: Option<u32>,
@@ -711,7 +727,7 @@ impl World {
     /// Health from an UpdateHealth event (f32 0..1 of max). Applies to self,
     /// or — when the guid is the current target — to the live target-health
     /// display (driven by the `QueryHealth` heartbeat).
-    pub fn update_health_event(&mut self, guid: u32, pct: f32) {
+    pub fn update_health_event(&mut self, guid: u32, pct: f32, target: Option<u32>) {
         let pct = pct.clamp(0.0, 1.0);
         if Some(guid) == self.self_guid {
             if let Some(max) = self.vitals.health_max {
@@ -721,7 +737,7 @@ impl World {
             }
             return;
         }
-        if Some(guid) == self.target_guid {
+        if Some(guid) == target {
             if let Some(max) = self.target_health_max {
                 self.target_health = Some((pct * max as f32) as u32);
             }
