@@ -388,10 +388,9 @@ impl Scene {
                 }
                 _ => IDENTITY,
             };
-            let (q, mut t) = acegeom::compose3(&IDENTITY, &pos_frame, &pf);
-            t[2] += acegeom::ACTOR_GROUND_LIFT;
+            let (q, t) = acegeom::compose3(&IDENTITY, &pos_frame, &pf);
             for i in (0..mesh.pos.len()).step_by(3) {
-                let v = acegeom::rot_st(q, mesh.pos[i], mesh.pos[i + 1], mesh.pos[i + 2], acegeom::ACTOR_SCALE, t);
+                let v = acegeom::rot_t(q, mesh.pos[i], mesh.pos[i + 1], mesh.pos[i + 2], t);
                 mn[0] = mn[0].min(v[0]);
                 mn[1] = mn[1].min(v[1]);
                 mn[2] = mn[2].min(v[2]);

@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::acegeom::{self, ACTOR_GROUND_LIFT, ACTOR_SCALE, Animation, AnimRef, Frame, MotionTable, IDENTITY};
+use crate::acegeom::{self, ACTOR_GROUND_LIFT, Animation, AnimRef, Frame, MotionTable, IDENTITY};
 use crate::scene::{mat_color, NULL_PART, Scene};
 use crate::{wrap_block_coord, Aabb, Actor, Camera, Frame3D, ReticleTarget, Solid};
 
@@ -1028,21 +1028,24 @@ fn build_dynamic_soup(
 
             let pf = pose.part_frames.get(pi).copied().unwrap_or(IDENTITY);
             let (q, t) = acegeom::compose3(&obj, &pose.pos_frame, &pf);
-            // Bring the model's feet to the actor's z (the ground): the mesh's
-            // rest pose floats ~0.47 u below its origin, and the ACTOR_SCALE
-            // amplifies that offset. The glow/reticle/pick all treat the
-            // actor's z as the feet, so the body must sit there too.
+            // Bring the humanoid model's feet to the actor's z (the ground):
+            // the mesh's rest pose floats ~0.47 u below its origin, and the
+            // scale amplifies that offset. Objects (scale 1.0) sit at their
+            // natural position. The glow/reticle/pick all treat the actor's z
+            // as the feet, so the body must sit there too.
             let mut t = t;
-            t[2] += ACTOR_GROUND_LIFT;
+            if a.scale != 1.0 {
+                t[2] += ACTOR_GROUND_LIFT;
+            }
 
             let (pos, tris, tri_mat, mats) = (&mesh.pos, &mesh.tris, &mesh.tri_mat, &mesh.mats);
             for ti in (0..tris.len()).step_by(3) {
                 let ia = tris[ti] as usize * 3;
                 let ib = tris[ti + 1] as usize * 3;
                 let ic = tris[ti + 2] as usize * 3;
-                let va = acegeom::rot_st(q, pos[ia], pos[ia + 1], pos[ia + 2], ACTOR_SCALE, t);
-                let vb = acegeom::rot_st(q, pos[ib], pos[ib + 1], pos[ib + 2], ACTOR_SCALE, t);
-                let vc = acegeom::rot_st(q, pos[ic], pos[ic + 1], pos[ic + 2], ACTOR_SCALE, t);
+                let va = acegeom::rot_st(q, pos[ia], pos[ia + 1], pos[ia + 2], a.scale, t);
+                let vb = acegeom::rot_st(q, pos[ib], pos[ib + 1], pos[ib + 2], a.scale, t);
+                let vc = acegeom::rot_st(q, pos[ic], pos[ic + 1], pos[ic + 2], a.scale, t);
                 let [mr, mg, mb] = mat_color(mats[tri_mat[ti / 3] as usize]);
                 out.extend_from_slice(&[
                     va[0], va[1], va[2], vb[0], vb[1], vb[2], vc[0], vc[1], vc[2], mr, mg, mb,
@@ -1207,6 +1210,7 @@ mod tests {
                 motion_cmd: MCMD_WALK_FORWARD,
                 style: 0x8000003d,
                 glow: Some(0xFFE08C),
+                scale: crate::acegeom::ACTOR_SCALE,
             },
             Actor {
                 guid: 2,
@@ -1220,6 +1224,7 @@ mod tests {
                 motion_cmd: 0,
                 style: 0x3d,
                 glow: Some(0xFF965A),
+                scale: crate::acegeom::ACTOR_SCALE,
             },
         ];
         let reticle = ReticleTarget {

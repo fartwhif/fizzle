@@ -2632,12 +2632,10 @@ impl App {
             }
             // ` toggles combat / peace mode (sent to the server).
             KeyCode::Char('`') => self.toggle_combat_mode(),
-            // Targeting (the retail key map): +/- the compass items
-            // (creatures), ' the closest creature, L/; the previous/next
-            // creature, [/] the previous/next object, \ the closest object,
-            // ,/. the previous/next person, / the closest person.
-            KeyCode::Char('+') => self.cycle_target(0, 1),
-            KeyCode::Char('-') => self.cycle_target(0, -1),
+            // Targeting (the retail key map): ' the closest creature, L/;
+            // the previous/next creature, \ the closest object, [/] the
+            // previous/next object, / the closest person, ,/. the
+            // previous/next person.
             KeyCode::Char('l') | KeyCode::Char('L') => self.cycle_target(0, -1),
             KeyCode::Char(';') => self.cycle_target(0, 1),
             KeyCode::Char('[') => self.cycle_target(1, -1),

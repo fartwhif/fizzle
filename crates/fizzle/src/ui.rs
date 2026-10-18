@@ -29,7 +29,7 @@ use crate::world::{
     ChatStyle, Entity, Inventory, ItemState, VendorItem, VendorState, MAIN_PACK_CAPACITY,
     ITEM_TYPE_CONTAINER, ITEM_TYPE_DOOR,
 };
-use acgeo::{Actor, Camera, ReticleTarget, get_dereth_land, wrap_block_coord};
+use acgeo::{Actor, Camera, ReticleTarget, get_dereth_land, wrap_block_coord, ACTOR_SCALE};
 
 // ================================================================== constants
 
@@ -853,6 +853,7 @@ fn build_actors(app: &App) -> Vec<Actor> {
                 motion_cmd: e.motion_cmd,
                 style: 0,
                 glow: Some(GLOW_SELF),
+                scale: ACTOR_SCALE,
             });
             continue;
         }
@@ -883,6 +884,9 @@ fn build_actors(app: &App) -> Vec<Actor> {
             motion_cmd: if e.is_player { e.motion_cmd } else { MCMD_READY },
             style: if e.is_player { 0 } else { STYLE_CREATURE },
             glow,
+            // Humanoid bodies (players/creatures) render at the scaled-up
+            // height; objects (ground items/doors/containers) stay 1.0.
+            scale: if glow.is_some() { ACTOR_SCALE } else { 1.0 },
         });
     }
     actors

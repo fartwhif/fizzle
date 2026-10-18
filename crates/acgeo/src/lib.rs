@@ -19,6 +19,10 @@ pub mod dereth;
 pub mod render;
 pub mod scene;
 
+/// The humanoid body scale (re-exported from [`acegeom`]); callers that build
+/// [`Actor`]s set it for creatures/players and 1.0 for objects.
+pub use acegeom::ACTOR_SCALE;
+
 /// A world-space axis-aligned box: `[min_x, min_y, min_z, max_x, max_y, max_z]`.
 pub type Aabb = [f32; 6];
 
@@ -76,6 +80,9 @@ pub struct Actor {
     /// (which knows self / player / creature) sets it: self = gold, other
     /// players = cyan, creatures = orange.
     pub glow: Option<u32>,
+    /// Model scale (1.0 for objects/doors; the humanoid body scale for
+    /// creatures/players, whose retail meshes are ~0.825 u tall).
+    pub scale: f32,
 }
 
 /// The current target's body box, for the 2D reticle overlay (feet position).
