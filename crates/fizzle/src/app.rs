@@ -1,7 +1,7 @@
 //! The application state machine: auth, character selection/creation, and the
 //! in-world session (movement, combat, chat, keepalive).
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKeyCode};
@@ -18,6 +18,14 @@ use crate::world::{BookPage, BookState, ChatStyle, Combat, ItemState, World};
 /// attempt, cap 5 min. A successful login resets the sequence.
 const RECONNECT_MIN_MS: u64 = 10_000;
 const RECONNECT_MAX_MS: u64 = 300_000;
+
+/// A held movement key only counts as "down" for this long after its last
+/// Press/Repeat. Terminals generally do NOT send key-release events (crossterm
+/// only reports `KeyEventKind::Release` under the kitty/CSI-u protocol), so a
+/// set of held keys would never clear and the character would keep moving. A
+/// short window past the terminal's auto-repeat interval stops motion ~100 ms
+/// after the last repeat instead of relying on a release we never get.
+const MOVE_HOLD_WINDOW: Duration = Duration::from_millis(100);
 
 /// Top-level session phase.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,7 +234,9 @@ pub struct App {
     pub self_name: String,
     pub self_guid: Option<u32>,
     // Input
-    pub keys_down: HashSet<KeyCode>,
+    /// Last Press/Repeat time per held movement key. A key counts as held only
+    /// within `MOVE_HOLD_WINDOW` of this (terminals don't send releases).
+    pub keys_down: HashMap<KeyCode, Instant>,
     pub shift_held: bool,
     pub chat_buf: String,
     pub chat_focused: bool,
@@ -361,7 +371,7 @@ impl App {
             movement: None,
             self_name: String::new(),
             self_guid: None,
-            keys_down: HashSet::new(),
+            keys_down: HashMap::new(),
             shift_held: false,
             chat_buf: String::new(),
             chat_focused: false,
@@ -1194,10 +1204,11 @@ impl App {
                     district: h.owner_name.clone(),
                 });
             }
-            Event::HouseStatus { code } => {
-                if code != 0 {
-                    self.world.chat.push("House", &format!("House error {code}"), ChatStyle::Error);
-                }
+            Event::HouseStatus { code: _ } => {
+                // Answer to the HOUSE_QUERY sent at world entry: a non-zero
+                // WeenieError (e.g. 2 = not the owner) just means we don't own
+                // a house — the normal "no house" response, not an error.
+                // Owned-house info arrives via HouseData instead.
             }
             Event::CloseGroundContainer { container_guid } => {
                 if container_guid == self.world.container.guid {
@@ -1362,7 +1373,18 @@ impl App {
         } else {
             Vec::new()
         };
-        self.world.clamp_target(self.targets.len());
+        // Keep the target stable by guid: the list is sorted by distance, so a
+        // given entity's index shifts every refresh as entities move. Re-find
+        // the targeted guid's position; drop the target if it fell out of
+        // range. (Reading `targets[target_index]` directly made the displayed
+        // target silently change to whatever entity landed at that index.)
+        match self.world.target_guid.and_then(|g| self.targets.iter().position(|&t| t == g)) {
+            Some(i) => self.world.target_index = i,
+            None => {
+                self.world.target_guid = None;
+                self.world.target_index = 0;
+            }
+        }
     }
 
     /// Cycle to the previous/next target of `kind` and appraise it.
@@ -1406,7 +1428,7 @@ impl App {
 
     /// Send IdentifyObject + QueryHealth for the current target.
     pub fn appraise_current(&mut self) {
-        let Some(guid) = self.current_target() else {
+        let Some(guid) = self.targets.get(self.world.target_index).copied() else {
             self.world.target_guid = None;
             self.world.target_health = None;
             self.world.target_health_max = None;
@@ -1423,9 +1445,11 @@ impl App {
         self.send_action(messages::action::QUERY_HEALTH, &messages::body_query_health(guid));
     }
 
-    /// The currently targeted guid, if any.
+    /// The currently targeted guid, if any. This is the stable target (tracked
+    /// by guid, not by list index, so it doesn't drift as the distance-sorted
+    /// target list reorders every tick).
     pub fn current_target(&self) -> Option<u32> {
-        self.targets.get(self.world.target_index).copied()
+        self.world.target_guid
     }
 
     // ---------------------------------------------------- world actions
@@ -2549,14 +2573,14 @@ impl App {
             }
             return;
         }
-        // Movement keys: track held state. A held key's OS repeat arrives as a
-        // `Repeat` event (kind != Press); treat Press and Repeat as "down" and
-        // only a `Release` as "up". Otherwise the first repeat (~500 ms in)
-        // clears the key and the character moves a moment, then stops.
+        // Movement keys: record the last Press/Repeat time for each. A held
+        // key's OS auto-repeat arrives as `Repeat` events; terminals generally
+        // send no `Release`, so a key counts as held only within
+        // `MOVE_HOLD_WINDOW` of its last event (see `held_keys`).
         if is_move_key(ev.code) {
             let down = matches!(ev.kind, KeyEventKind::Press | KeyEventKind::Repeat);
             if down {
-                self.keys_down.insert(ev.code);
+                self.keys_down.insert(ev.code, Instant::now());
             } else {
                 self.keys_down.remove(&ev.code);
             }
@@ -2813,10 +2837,17 @@ impl App {
         }
     }
 
-    /// Build the current held-key set from `keys_down`.
+    /// Build the current held-key set from `keys_down`. A key counts as held
+    /// only within `MOVE_HOLD_WINDOW` of its last Press/Repeat (terminals send
+    /// no release events, so a bare held set would never clear).
     #[must_use]
     fn held_keys(&self) -> HeldKeys {
-        let down = |c: KeyCode| self.keys_down.contains(&c);
+        let now = Instant::now();
+        let down = |c: KeyCode| {
+            self.keys_down
+                .get(&c)
+                .is_some_and(|t| now.duration_since(*t) <= MOVE_HOLD_WINDOW)
+        };
         HeldKeys {
             forward: down(KeyCode::Char('w')) || down(KeyCode::Up),
             backward: down(KeyCode::Char('x')) || down(KeyCode::Down),
@@ -3143,6 +3174,74 @@ fn parse_channel(name: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Regression for "movement keys lose control": terminals generally send no
+    /// key-release events, so a bare held-key set never cleared and the
+    /// character kept moving. A key now counts as held only within
+    /// `MOVE_HOLD_WINDOW` of its last Press/Repeat; an older entry (the one
+    /// left behind when the key was released) must not.
+    #[test]
+    fn held_keys_respect_last_seen_window() {
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        app.keys_down.insert(KeyCode::Char('w'), Instant::now());
+        assert!(app.held_keys().forward, "a fresh press is held");
+        app.keys_down.insert(
+            KeyCode::Char('w'),
+            Instant::now() - (MOVE_HOLD_WINDOW + Duration::from_millis(50)),
+        );
+        assert!(!app.held_keys().forward, "a key past the window is released");
+    }
+
+    /// Regression for "the displayed target differs from the real one": the
+    /// target list is sorted by distance and rebuilt every tick, so a bare
+    /// index into it drifts to a different entity as they move. The target is
+    /// now tracked by guid; the current target must stay the same entity
+    /// across a reorder (not jump to whatever lands at the old index).
+    #[test]
+    fn target_is_stable_across_list_reorder() {
+        use acproto::codec::Vec3;
+        use crate::movement::Movement;
+        use crate::world::Entity;
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        let cell = 0x0001_0000u32;
+        app.movement = Some(Movement::new(cell, Vec3 { x: 0.0, y: 0.0, z: 0.0 }));
+        let ent = |guid: u32, x: f32| Entity {
+            guid,
+            name: None,
+            cell,
+            pos: Vec3 { x, y: 0.0, z: 0.0 },
+            rot: [1.0, 0.0, 0.0, 0.0],
+            is_player: true,
+            health: Some(100),
+            health_max: Some(100),
+            mana: None,
+            mana_max: None,
+            item_type: 0,
+            setup_id: None,
+            mtable_id: None,
+            model_parts: None,
+            motion_cmd: 0,
+            physics_state: 0,
+            is_vendor: false,
+            last_seen: Instant::now(),
+        };
+        // A is closer (5) than B (10). Target A.
+        app.world.entities.insert(1, ent(1, 5.0));
+        app.world.entities.insert(2, ent(2, 10.0));
+        app.target_kind = 0;
+        app.world.target_guid = Some(1);
+        app.refresh_targets();
+        assert_eq!(app.current_target(), Some(1));
+        // Now B is closer and A farther; the list reorders to [B, A]. The
+        // target must stay A (guid-tracked), not drift to B at the old index.
+        app.world.entities.insert(1, ent(1, 10.0));
+        app.world.entities.insert(2, ent(2, 5.0));
+        app.refresh_targets();
+        assert_eq!(
+            app.current_target(),
+            Some(1),
+            "target must stay A across the reorder, not drift to the new index-0"
+        );
+    }
 
     fn character_error_packet(code: u32) -> Vec<u8> {
         messages::game_message(messages::opcode::CHARACTER_ERROR, &code.to_le_bytes())
@@ -3275,7 +3374,7 @@ mod tests {
         app.phase = Phase::InWorld;
         app.menu_view = Some(MenuView::Menu);
         app.chat_focused = true;
-        app.keys_down.insert(KeyCode::Char('w'));
+        app.keys_down.insert(KeyCode::Char('w'), Instant::now());
         app.pending_jump = true;
 
         app.handle_game_message(&messages::game_message(messages::opcode::CHARACTER_LOGOFF, &[]));

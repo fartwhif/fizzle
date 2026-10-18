@@ -826,13 +826,6 @@ impl World {
         v.into_iter().map(|(_, g)| g).collect()
     }
 
-    /// Clamp the target index into range (call after entity changes).
-    pub fn clamp_target(&mut self, count: usize) {
-        if self.target_index >= count {
-            self.target_index = count.saturating_sub(1);
-        }
-    }
-
     // ---------------------------------------------------------- far culling
 
     /// Global (block-decomposed) distance between self and an entity, in
