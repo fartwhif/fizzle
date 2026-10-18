@@ -198,19 +198,20 @@ const WORLD_VIEWS: [&str; 2] = [
 ];
 
 /// The Esc menu's top-level items.
-const MENU_ITEMS: [&str; 7] = [
+const MENU_ITEMS: [&str; 8] = [
     "Themes (borders + colors)",
     "Widgets (right-column multi box)",
     "World view (world pane render mode)",
     "Actor glow (3d halo around characters)",
+    "Target reticle (3d: animate the target box)",
     "Help (key map)",
     "Log out of the world",
     "Quit",
 ];
 
-/// The help screen's key map (fizzle: no camera numpad, no F12 pack toggle,
-/// no server/account form, no plugin toggles).
-const HELP_LINES: [&str; 79] = [
+/// The help screen's key map (fizzle: retail F-key panel toggles, but no
+/// camera numpad, no server/account form, no plugin toggles).
+const HELP_LINES: [&str; 81] = [
     "World keys (the definitive AC key map; the Esc menu aside):",
     "Movement (client-side sim; the server corrects if it disagrees):",
     "  W / up arrow          forward           X / down arrow       backward",
@@ -218,8 +219,7 @@ const HELP_LINES: [&str; 79] = [
     "  Z / C                 strafe left / right  S                 stop",
     "  space                 jump",
     "  hold several move keys to combine (W+D arc, W+C diagonal)",
-    "  (a tap is a small nudge; a held key pauses until the terminal's",
-    "  first auto-repeat, then continues; S stops all movement)",
+    "  (a tap is a small nudge; a held key moves continuously; S stops all movement)",
     "  Shift (any move key)  walk (else the run lock decides run / walk)",
     "  Q                     run lock on / off (default on)",
     "Targeting and objects (the retail key map):",
@@ -237,6 +237,7 @@ const HELP_LINES: [&str; 79] = [
     "  E / e                 examine the target (works from any widget)",
     "  T                     attack the target (melee; combat stance first)",
     "  `                     toggle combat / peace mode (sent to the server)",
+    "  (you're in the compass too — cycle + / - to target yourself)",
     "Spells:",
     "  1-9, 0                spell slots 1-10",
     "  Del / PgDn            the spell to the left / the next spell",
@@ -245,6 +246,8 @@ const HELP_LINES: [&str; 79] = [
     "UI:",
     "  Enter / Tab           open chat (Enter sends; Tab or Esc closes it)",
     "  F1                    this help",
+    "  F3 / F4                 allegiance / fellowship panel",
+    "  F5 / F8 / F9 / F12      spellbook / attributes / skills / inventory panel",
     "  Esc                   open the menu",
     "  Shift+Esc             log out of the world",
     "  Esc menu -> Widgets   set the right-column multi widget",
@@ -806,7 +809,7 @@ fn draw_world3d(f: &mut Frame, app: &mut App, lb: WLayout) {
     let frame = app
         .world3d
         .as_mut()
-        .and_then(|w3d| w3d.render(lb_id, &cam, &actors, cols, rows, app.glow_actors, ret.as_ref()));
+        .and_then(|w3d| w3d.render(lb_id, &cam, &actors, cols, rows, app.glow_actors, ret.as_ref(), app.reticle_animation));
     let Some(frame) = frame else {
         note("(3d: nothing to render)");
         return;
@@ -1398,14 +1401,18 @@ fn draw_attributes(f: &mut Frame, app: &App, x0: u16, y0: u16, rows: usize, inne
 
 fn draw_skills(f: &mut Frame, app: &App, x0: u16, y0: u16, rows: usize, inner_w: usize) {
     let sk = &app.world.skills;
-    let active: Vec<&(u32, i32)> = sk.skills.iter().filter(|(_, r)| *r > 0).collect();
-    if active.is_empty() {
+    if sk.skills.is_empty() {
         mnote(f, app, x0, y0, rows, inner_w, 0, "no trained skills");
         return;
     }
-    mrow(f, app, x0, y0, rows, inner_w, 0, &format!("{} active of {}", active.len(), sk.skills.len()), normal(app));
+    // Every skill the character owns: a fresh character's list is all rank 0
+    // (the server sends it that way), so showing only rank > 0 would be empty.
+    // Trained skills sort first, then by retail ID.
+    let mut list: Vec<&(u32, i32)> = sk.skills.iter().collect();
+    list.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    mrow(f, app, x0, y0, rows, inner_w, 0, &format!("{} skills", list.len()), normal(app));
     let cap = rows.saturating_sub(1);
-    for (i, (id, rank)) in active.iter().enumerate() {
+    for (i, (id, rank)) in list.iter().enumerate() {
         if i < app.list_scroll {
             continue;
         }
@@ -1413,10 +1420,11 @@ fn draw_skills(f: &mut Frame, app: &App, x0: u16, y0: u16, rows: usize, inner_w:
         if row >= rows {
             break;
         }
-        mrow(f, app, x0, y0, rows, inner_w, row, &format!("skill {id}  {rank}"), normal(app));
+        let name = acproto::messages::SKILL_NAMES.get(*id as usize).copied().unwrap_or("skill");
+        mrow(f, app, x0, y0, rows, inner_w, row, &format!("{name}  {rank}"), normal(app));
     }
-    if active.len() > app.list_scroll + cap {
-        mrow(f, app, x0, y0, rows, inner_w, rows.saturating_sub(1), &format!("+{} more", active.len() - app.list_scroll - cap), dark(app));
+    if list.len() > app.list_scroll + cap {
+        mrow(f, app, x0, y0, rows, inner_w, rows.saturating_sub(1), &format!("+{} more", list.len() - app.list_scroll - cap), dark(app));
     }
 }
 
@@ -2167,7 +2175,7 @@ fn put_segs(f: &mut Frame, app: &App, row: u16, base: u16, max_w: u16, segs: &[S
             break;
         }
         let take = s.text.len().min(max_w as usize - (c - base) as usize);
-        if take <= 0 {
+        if take == 0 {
             break;
         }
         put(f, row, c, &s.text[..take], seg_style(app, s.style));
@@ -2186,7 +2194,7 @@ fn seg_ranges(segs: &[Seg], base: u16, max_w: u16) -> Vec<(u16, u16)> {
             break;
         }
         let take = s.text.len().min(max_w as usize - (c - base) as usize);
-        if take <= 0 {
+        if take == 0 {
             break;
         }
         out.push((c, c + take as u16));
@@ -3902,10 +3910,17 @@ fn view_press(app: &mut App, view: MenuView, r: u16, c: u16, h: u16, w: u16) {
                 ));
             }
             4 => {
+                app.reticle_animation = !app.reticle_animation;
+                app.world.flash = Some(format!(
+                    "reticle animation: {}",
+                    if app.reticle_animation { "on" } else { "off" }
+                ));
+            }
+            5 => {
                 app.menu_view = Some(MenuView::Help);
                 app.help_scroll = 0;
             }
-            5 => app.logout(),
+            6 => app.logout(),
             _ => app.quit = true,
         },
         MenuView::Themes => {
@@ -3946,6 +3961,8 @@ fn draw_menu_view(f: &mut Frame, app: &App, area: Rect, view: MenuView) {
             for (i, item) in MENU_ITEMS.iter().enumerate() {
                 let line = if i == 3 {
                     format!("{}: {}", item, if app.glow_actors { "on" } else { "off" })
+                } else if i == 4 {
+                    format!("{}: {}", item, if app.reticle_animation { "on" } else { "off" })
                 } else {
                     item.to_string()
                 };

@@ -201,8 +201,9 @@ impl World3D {
 
     /// Render the landblock `lb` from the camera `cam` into `cols × rows`.
     /// `actors` are the visible bodies; `glow` toggles the actor halos;
-    /// `reticle` is the current target box (or `None`). `None` when there is
-    /// nothing to draw (no dats, no terrain and no actors, or too small).
+    /// `reticle` is the current target box (or `None`); `reticle_animated`
+    /// toggles the reticle's breathing pulse. `None` when there is nothing to
+    /// draw (no dats, no terrain and no actors, or too small).
     #[must_use]
     pub fn render(
         &mut self,
@@ -213,6 +214,7 @@ impl World3D {
         rows: usize,
         glow: bool,
         reticle: Option<&ReticleTarget>,
+        reticle_animated: bool,
     ) -> Option<Frame3D> {
         render::render_frame(
             &mut self.scene,
@@ -227,6 +229,7 @@ impl World3D {
             rows,
             glow,
             reticle,
+            reticle_animated,
         )
     }
 }

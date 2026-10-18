@@ -326,6 +326,8 @@ pub struct App {
     pub world_view: bool,
     /// Draw the 3D actor glow halos.
     pub glow_actors: bool,
+    /// Animate the 3D target-reticle's breathing pulse (off = a steady box).
+    pub reticle_animation: bool,
     /// Retail DAT directory override (None = auto-resolve).
     pub dat_dir: Option<String>,
     /// Selected multi-widget index (0..=13).
@@ -409,6 +411,7 @@ impl App {
             theme: Theme::Custom,
             world_view: false,
             glow_actors: true,
+            reticle_animation: true,
             dat_dir: None,
             multi_sel: 0,
             reconnect_at: None,
@@ -742,6 +745,8 @@ impl App {
                     && self.phase == Phase::Entering
                     && self.movement.is_none()
                 {
+                    // Self is a first-class, targetable player entity.
+                    self.world.set_self(o.guid, self.self_name.clone());
                     if let Some(p) = position {
                         self.movement = Some(Movement::new(p.cell, p.pos));
                         self.phase = Phase::InWorld;
@@ -767,6 +772,7 @@ impl App {
                     if self.movement.is_none() {
                         self.movement = Some(Movement::new(up.cell, up.pos));
                         self.world.self_guid = Some(up.guid);
+                        self.world.set_self(up.guid, self.self_name.clone());
                         if self.phase == Phase::Entering {
                             self.phase = Phase::InWorld;
                             self.status = "In world.".into();
@@ -1386,7 +1392,15 @@ impl App {
             self.world.flash = Some("no targets of that kind in range".into());
             return;
         }
-        self.world.target_index = 0;
+        // The nearest search skips yourself (retail's closest-monster /
+        // closest-player exclude you; you're reachable by cycling the
+        // compass). Fall back to self if you're the only target in range.
+        let idx = self
+            .targets
+            .iter()
+            .position(|g| Some(*g) != self.world.self_guid)
+            .unwrap_or(0);
+        self.world.target_index = idx;
         self.appraise_current();
     }
 
@@ -1403,7 +1417,8 @@ impl App {
         // Seed max health from a prior appraise, if known; the Appraise
         // response below (and the heartbeat) keep it fresh.
         self.world.target_health_max = self.world.entities.get(&guid).and_then(|e| e.health_max);
-        self.world.flash = Some(format!("target: {}", entity_name(&self.world, guid)));
+        // The status-bar readout already shows the current target (name +
+        // vital); a second "target: X" flash made the name look doubled.
         self.send_action(messages::action::IDENTIFY_OBJECT, &messages::body_identify_object(guid));
         self.send_action(messages::action::QUERY_HEALTH, &messages::body_query_health(guid));
     }
@@ -2327,7 +2342,7 @@ impl App {
             ev.code,
             KeyCode::Modifier(ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift)
         ) {
-            self.shift_held = press;
+            self.shift_held = matches!(ev.kind, KeyEventKind::Press | KeyEventKind::Repeat);
             return;
         }
         // Fallback: infer Shift from the modifier state of any key event.
@@ -2534,9 +2549,13 @@ impl App {
             }
             return;
         }
-        // Movement keys: track held state.
+        // Movement keys: track held state. A held key's OS repeat arrives as a
+        // `Repeat` event (kind != Press); treat Press and Repeat as "down" and
+        // only a `Release` as "up". Otherwise the first repeat (~500 ms in)
+        // clears the key and the character moves a moment, then stops.
         if is_move_key(ev.code) {
-            if press {
+            let down = matches!(ev.kind, KeyEventKind::Press | KeyEventKind::Repeat);
+            if down {
                 self.keys_down.insert(ev.code);
             } else {
                 self.keys_down.remove(&ev.code);
@@ -2678,6 +2697,18 @@ impl App {
                 self.menu_sel = 0;
                 self.keys_down.clear();
             }
+            // Retail panel toggles (F-keys) switch the right-column multi
+            // widget (Allegiance/Fellowship/Spellbook/Attributes/Skills/
+            // Inventory); the Esc menu does the same for the rest.
+            KeyCode::F(3) => self.open_widget(0),
+            KeyCode::F(4) => self.open_widget(1),
+            KeyCode::F(5) => self.open_widget(4),
+            KeyCode::F(8) => self.open_widget(5),
+            KeyCode::F(9) => self.open_widget(6),
+            KeyCode::F(12) => self.open_widget(11),
+            // Retail Backspace (ClosestCompassItem): target the nearest
+            // creature, like '.
+            KeyCode::Backspace => self.nearest_target(0),
             _ => {}
         }
     }
@@ -2690,7 +2721,7 @@ impl App {
         use MenuView::{Help, Menu, Themes, Widgets, WorldView};
         match self.menu_view {
             Some(Menu) => {
-                const N: usize = 7; // themes, widgets, worldview, glow, help, logout, quit
+                const N: usize = 8; // themes, widgets, worldview, glow, reticle, help, logout, quit
                 match ev.code {
                     KeyCode::Up | KeyCode::Char('k') => self.menu_sel = (self.menu_sel + N - 1) % N,
                     KeyCode::Down | KeyCode::Char('j') => self.menu_sel = (self.menu_sel + 1) % N,
@@ -2715,10 +2746,17 @@ impl App {
                                 Some(format!("actor glow: {}", if self.glow_actors { "on" } else { "off" }));
                         }
                         4 => {
+                            self.reticle_animation = !self.reticle_animation;
+                            self.world.flash = Some(format!(
+                                "reticle animation: {}",
+                                if self.reticle_animation { "on" } else { "off" }
+                            ));
+                        }
+                        5 => {
                             self.menu_view = Some(Help);
                             self.help_scroll = 0;
                         }
-                        5 => self.logout(),
+                        6 => self.logout(),
                         _ => self.quit = true,
                     },
                     KeyCode::Esc => self.menu_view = None,

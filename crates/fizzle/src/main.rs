@@ -125,6 +125,7 @@ fn main() -> anyhow::Result<()> {
     app.theme = Theme::parse(&profiles.theme).unwrap_or(Theme::Custom);
     app.world_view = profiles.world_view == "3d";
     app.glow_actors = profiles.glow_actors;
+    app.reticle_animation = profiles.reticle_animation;
     app.dat_dir = profiles.dat_dir.clone();
     app.world3d = Some(World3D::new(app.dat_dir.as_deref()));
     app.start();
@@ -138,6 +139,7 @@ fn main() -> anyhow::Result<()> {
     profiles.theme = app.theme.name().to_string();
     profiles.world_view = if app.world_view { "3d" } else { "tactical" }.to_string();
     profiles.glow_actors = app.glow_actors;
+    profiles.reticle_animation = app.reticle_animation;
     let _ = profiles.save();
     result
 }

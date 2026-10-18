@@ -565,8 +565,6 @@ fn raster_door_box(
 /// plane.
 fn screen_box_for(
     b: &Basis,
-    cols: usize,
-    rows: usize,
     cx: f32,
     cy: f32,
     cz: f32,
@@ -590,10 +588,10 @@ fn screen_box_for(
     if !min_x.is_finite() {
         return None;
     }
-    let x0 = (min_x.floor() as i32).max(0);
-    let y0 = (min_y.floor() as i32).max(0);
-    let x1 = (max_x.ceil() as i32).clamp(0, cols as i32 - 1);
-    let y1 = (max_y.ceil() as i32).clamp(0, rows as i32 - 1);
+    let x0 = min_x.floor() as i32;
+    let y0 = min_y.floor() as i32;
+    let x1 = max_x.ceil() as i32;
+    let y1 = max_y.ceil() as i32;
     if x1 < x0 || y1 < y0 {
         return None;
     }
@@ -1071,6 +1069,7 @@ pub fn render_frame(
     rows: usize,
     glow: bool,
     reticle: Option<&ReticleTarget>,
+    reticle_animated: bool,
 ) -> Option<Frame3D> {
     if cols < 4 || rows < 4 {
         return None;
@@ -1135,8 +1134,13 @@ pub fn render_frame(
     }
     // The target reticle: drawn last so the box stays crisp on top.
     if let Some(rt) = reticle {
-        if let Some(sb) = screen_box_for(&basis, cols, rows, rt.x, rt.y, rt.z, rt.r, rt.half_h) {
-            let phase = (now % RETICLE_PERIOD) / RETICLE_PERIOD;
+        if let Some(sb) = screen_box_for(&basis, rt.x, rt.y, rt.z, rt.r, rt.half_h) {
+            // Off: hold a fixed mid-phase (a steady box, no breathing pulse).
+            let phase = if reticle_animated {
+                (now % RETICLE_PERIOD) / RETICLE_PERIOD
+            } else {
+                0.5
+            };
             draw_target_reticle(&mut cells, cols, rows, sb, phase);
         }
     }
@@ -1224,6 +1228,7 @@ mod tests {
             24,
             true,
             Some(&reticle),
+            true,
         )
         .expect("frame for a known landblock");
         assert_eq!(frame.cols, 80);
@@ -1252,6 +1257,7 @@ mod tests {
             24,
             false,
             None,
+            false,
         )
         .expect("second frame");
         assert_eq!(frame2.cells.len(), 80 * 24);
@@ -1312,6 +1318,7 @@ mod tests {
                 24,
                 false,
                 None,
+                false,
             )
             .expect("frame for a known landblock")
             .cells
@@ -1358,6 +1365,7 @@ mod tests {
             24,
             true,
             None,
+            false,
         );
         assert!(frame.is_none());
         // Too small is also nothing.
@@ -1376,8 +1384,45 @@ mod tests {
                 2,
                 false,
                 None,
+                false,
             )
             .is_none()
+        );
+    }
+    #[test]
+    fn reticle_box_reaches_true_extent_not_clamped() {
+        // Regression: the target reticle must stay centered overtop the target
+        // even near a pane edge. The projected box used to be clamped to the
+        // pane, which shifted the box (and the reticle) toward the pane center
+        // and off the target. The box must reach the true projected extent.
+        let cols = 80usize;
+        let rows = 24usize;
+        let cam = Camera { x: 0.0, y: 0.0, z: 0.0, heading: 0.0 };
+        let b = camera_basis(&cam, cols, rows, CAM_BACK);
+        let (tx, ty, tz) = (40.0, 10.0, 0.0);
+        let r = 0.9f32;
+        let half_h = 1.4f32;
+        // The true projected horizontal extent (no pane clamp).
+        let mut max_x = f32::NEG_INFINITY;
+        for dx in [-r, r] {
+            for dy in [-r, r] {
+                for dz in [0.0, half_h * 2.0] {
+                    if let Some(p) = project(&b, tx + dx, ty + dy, tz + dz) {
+                        max_x = max_x.max(p.0);
+                    }
+                }
+            }
+        }
+        assert!(
+            max_x > (cols - 1) as f32,
+            "test target should cross the right edge (max_x={max_x})"
+        );
+        let Some((_x0, _y0, x1, _y1)) = screen_box_for(&b, tx, ty, tz, r, half_h) else {
+            panic!("screen_box_for should return a box");
+        };
+        assert!(
+            x1 >= max_x.floor() as i32,
+            "box x1={x1} must reach the true extent {max_x} (not clamped to the pane)"
         );
     }
 }

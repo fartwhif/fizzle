@@ -335,6 +335,12 @@ pub struct Examine {
     pub valid: bool,
 }
 
+/// The retail "AlwaysTrained" skills every character owns (ACE
+/// `Player_Skills.AlwaysTrained`): Arcane Lore, Magic Defense, Jump, Run,
+/// Loyalty, Salvaging. The server omits some of these and sends the rest at
+/// rank 0, so seed the absent ones to keep the Skills panel honest.
+const INNATE_SKILLS: [u32; 6] = [14, 15, 22, 24, 36, 40];
+
 /// Skills, spells, and the 8-tab spell bar.
 #[derive(Clone, Debug, Default)]
 pub struct Skills {
@@ -412,6 +418,9 @@ pub struct BookState {
 #[derive(Clone, Debug, Default)]
 pub struct World {
     pub self_guid: Option<u32>,
+    /// The self character's name (set at world entry; used for targeting
+    /// readouts and the You pane).
+    pub self_name: String,
     pub entities: std::collections::HashMap<u32, Entity>,
     pub chat: ChatLog,
     pub vitals: Vitals,
@@ -478,6 +487,18 @@ impl World {
 
     pub fn player_create(&mut self, guid: u32) {
         self.upsert(guid, true).last_seen = Instant::now();
+    }
+
+    /// Establish `guid` as the self entity: a targetable player (the radar,
+    /// tactical map and far-cull skip it; the 3D view renders it from the
+    /// movement state), named `name`. Idempotent — called at world entry.
+    pub fn set_self(&mut self, guid: u32, name: String) {
+        self.self_guid = Some(guid);
+        self.self_name = name.clone();
+        let e = self.upsert(guid, true);
+        e.is_player = true;
+        e.name = Some(name);
+        e.last_seen = Instant::now();
     }
 
     pub fn object_create(&mut self, guid: u32, name: Option<String>, cell: Option<u32>, pos: Option<Vec3>, item: Option<&ItemState>, rot: Option<[f32; 4]>) {
@@ -575,6 +596,14 @@ impl World {
     /// Skills, spells, spell bar, and burden/coin from PlayerDescription.
     pub fn apply_player_description_tail(&mut self, d: &messages::PlayerDescription) {
         self.skills.skills = d.skills.clone();
+        // Seed the AlwaysTrained innate skills the server omits (fresh
+        // characters own these at rank 0; a fresh character's whole list is
+        // rank 0, so the panel must not hide them).
+        for innate in INNATE_SKILLS {
+            if !self.skills.skills.iter().any(|(id, _)| *id == innate) {
+                self.skills.skills.push((innate, 0));
+            }
+        }
         self.skills.spells = d.spells.clone();
         self.skills.spell_bar = d.spell_bar.clone();
         self.skills.filters = d.spell_filters.clone();
@@ -599,6 +628,9 @@ impl World {
     /// Display name of a tracked entity (empty when unknown).
     #[must_use]
     pub fn entity_name(&self, guid: u32) -> String {
+        if Some(guid) == self.self_guid && !self.self_name.is_empty() {
+            return self.self_name.clone();
+        }
         self.entities.get(&guid).map(|e| e.display_name()).unwrap_or_default()
     }
 
@@ -765,15 +797,27 @@ impl World {
         let mut v: Vec<(f32, u32)> = self
             .entities
             .values()
-            .filter(|e| Some(e.guid) != self.self_guid && e.block() == block)
-            .filter(|e| match kind {
-                1 => !is_creature(e),
-                2 => e.is_player,
-                _ => is_creature(e),
+            .filter(|e| e.block() == block)
+            .filter(|e| {
+                let is_self = Some(e.guid) == self.self_guid;
+                match kind {
+                    // Objects: never self.
+                    1 => !is_creature(e) && !is_self,
+                    // Players: include self (you can target yourself).
+                    2 => e.is_player || is_self,
+                    // Creatures: include self (retail cycles you in the compass).
+                    _ => is_creature(e) || is_self,
+                }
             })
             .map(|e| {
-                let d = ((e.pos.x - self_pos.x).powi(2) + (e.pos.y - self_pos.y).powi(2) + (e.pos.z - self_pos.z).powi(2))
-                    .sqrt();
+                let d = if Some(e.guid) == self.self_guid {
+                    // Self is at zero range (its entity position is the spawn
+                    // snapshot, not live; the movement state owns it).
+                    0.0
+                } else {
+                    ((e.pos.x - self_pos.x).powi(2) + (e.pos.y - self_pos.y).powi(2) + (e.pos.z - self_pos.z).powi(2))
+                        .sqrt()
+                };
                 (d, e.guid)
             })
             .filter(|(d, _)| *d <= RADAR_RANGE)

@@ -48,6 +48,14 @@ pub struct Profiles {
     /// Draw the 3D actor glow halos.
     #[serde(default)]
     pub glow_actors: bool,
+    /// Animate the 3D target-reticle's breathing pulse.
+    #[serde(default = "default_reticle_animated")]
+    pub reticle_animation: bool,
+}
+
+/// Reticle animation is on by default.
+fn default_reticle_animated() -> bool {
+    true
 }
 
 impl Profiles {
