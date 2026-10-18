@@ -24,6 +24,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 
 use crate::app::{App, MenuView, Phase};
 use crate::themes::Theme;
+use acproto::messages::combat_mode;
 use crate::world::{
     ChatStyle, Entity, Inventory, ItemState, VendorItem, VendorState, MAIN_PACK_CAPACITY,
     ITEM_TYPE_CONTAINER, ITEM_TYPE_DOOR,
@@ -69,7 +70,8 @@ const CAM_LOOK_UP: f32 = 1.5;
 const CAM_FOCAL_K: f32 = 1.0;
 const CAM_NEAR: f32 = 0.5;
 
-/// The 3D actor glow-halo colors (players = cyan, creatures = orange).
+/// The 3D actor glow-halo colors (self = gold, players = cyan, creatures = orange).
+const GLOW_SELF: u32 = 0xFFD24A;
 const GLOW_PLAYER: u32 = 0x8CD0FF;
 const GLOW_CREATURE: u32 = 0xFF965A;
 
@@ -78,9 +80,25 @@ const WIDGET_LABELS: [&str; 14] = [
     "Allegiance", "Fellowship", "Friends", "Squelch", "Spellbook", "Attributes", "Skills",
     "Titles", "Contracts", "Map", "House", "Inventory", "You", "Examine",
 ];
-/// Distinct plain glyphs for the one-row widget selector (no Nerd Fonts).
+/// One-row widget selector: a Nerd Font `nf-md-*` (Material Design Icon)
+/// glyph per widget, in `WIDGET_LABELS` order. Code points are the
+/// `@mdi/font` values (Nerd Fonts v3 places MDI at 0xF0001-0xF1AF0); each
+/// measures as 1 cell so the row stays aligned.
 const WIDGET_GLYPHS: [char; 14] = [
-    'A', 'U', 'r', 's', 'S', 'a', 'k', 't', 'c', 'M', 'H', 'B', 'Y', 'X',
+    '\u{F023B}', // 0  Allegiance   flag
+    '\u{F000E}', // 1  Fellowship   account-multiple
+    '\u{F0899}', // 2  Friends      account-heart
+    '\u{F036D}', // 3  Squelch      microphone-off
+    '\u{F14F7}', // 4  Spellbook    book-open-variant
+    '\u{F0127}', // 5  Attributes   chart-areaspline
+    '\u{F0124}', // 6  Skills       certificate
+    '\u{F0987}', // 7  Titles       medal
+    '\u{F0219}', // 8  Contracts    file-document
+    '\u{F034D}', // 9  Map          map
+    '\u{F02DC}', // 10 House        home
+    '\u{F0D2E}', // 11 Inventory    sack
+    '\u{F0004}', // 12 You          account
+    '\u{F0349}', // 13 Examine      magnify
 ];
 
 /// The paper-doll slots: (id, name, row, col, EquipMask bits). Structural
@@ -126,39 +144,43 @@ const LOC_NAMES: [&str; 31] = [
 ];
 
 /// Item-type flags → (glyph, name), checked in order (first flag that
-/// matches wins). Plain glyphs only: no Nerd Fonts.
+/// matches wins). The glyph is a Nerd Font `nf-md-*` (Material Design Icon)
+/// code point — the `@mdi/font` value, since Nerd Fonts v3 places MDI at
+/// 0xF0001-0xF1AF0. Each measures as 1 cell, so pack/vendor/loot grids and
+/// the paper doll stay aligned. (Icons need a Nerd Font terminal; without
+/// one they render as empty/tofu boxes.)
 const ITEM_TYPES: [(u32, char, &str); 31] = [
-    (0x1, 'w', "melee"),
-    (0x100, 'm', "missile"),
-    (0x2, 'a', "armor"),
-    (0x4, 's', "clothing"),
-    (0x8, 'j', "jewelry"),
-    (0x10, 'c', "creature"),
-    (0x20, 'f', "food"),
-    (0x40, '$', "money"),
-    (0x80, '-', "misc"),
-    (0x200, 'b', "container"),
-    (0x400, '?', "useless"),
-    (0x800, 'g', "gem"),
-    (0x1000, 'v', "spellcomp"),
-    (0x2000, 'n', "writable"),
-    (0x4000, 'K', "key"),
-    (0x8000, 't', "caster"),
-    (0x10000, 'P', "portal"),
-    (0x20000, 'L', "lockable"),
-    (0x40000, 'e', "note"),
-    (0x80000, '!', "manastone"),
-    (0x100000, 'o', "service"),
-    (0x200000, '*', "magic"),
-    (0x400000, 'u', "cook"),
-    (0x800000, '%', "alchemy"),
-    (0x2000000, '+', "fletch"),
-    (0x4000000, '&', "alchemy+"),
-    (0x8000000, '=', "fletch+"),
-    (0x10000000, 'H', "lifestone"),
-    (0x20000000, 'T', "tool"),
-    (0x40000000, '#', "material"),
-    (0x80000000, 'B', "gameboard"),
+    (0x1, '\u{F04E5}', "melee"),          // sword
+    (0x100, '\u{F1841}', "missile"),      // bow-arrow
+    (0x2, '\u{F0498}', "armor"),          // shield
+    (0x4, '\u{F0A7C}', "clothing"),       // tshirt-v
+    (0x8, '\u{F0F0B}', "jewelry"),        // necklace
+    (0x10, '\u{F03E9}', "creature"),      // paw
+    (0x20, '\u{F025B}', "food"),          // food-apple
+    (0x40, '\u{F0114}', "money"),         // cash
+    (0x80, '\u{F00D4}', "misc"),          // box
+    (0x200, '\u{F003C}', "container"),    // archive
+    (0x400, '\u{F02D7}', "useless"),      // help-circle
+    (0x800, '\u{F01C8}', "gem"),          // diamond-stone
+    (0x1000, '\u{F0096}', "spellcomp"),   // flask-outline
+    (0x2000, '\u{F00BA}', "writable"),    // book
+    (0x4000, '\u{F0306}', "key"),         // key
+    (0x8000, '\u{F1844}', "caster"),      // magic-staff
+    (0x10000, '\u{F081A}', "portal"),     // door
+    (0x20000, '\u{F033E}', "lockable"),   // lock
+    (0x40000, '\u{F039E}', "note"),       // note-text
+    (0x80000, '\u{F0B2F}', "manastone"),  // crystal-ball
+    (0x100000, '\u{F10F1}', "service"),   // hand-heart
+    (0x200000, '\u{F04CE}', "magic"),     // star
+    (0x400000, '\u{F02E5}', "cook"),      // pot
+    (0x800000, '\u{F0093}', "alchemy"),   // flask
+    (0x2000000, '\u{F06D3}', "fletch"),   // feather
+    (0x4000000, '\u{F1242}', "alchemy+"), // flask-plus
+    (0x8000000, '\u{F06D3}', "fletch+"),  // feather (higher tier)
+    (0x10000000, '\u{F02D1}', "lifestone"),  // heart
+    (0x20000000, '\u{F05B7}', "tool"),         // wrench
+    (0x40000000, '\u{F01A6}', "material"),     // cube
+    (0x80000000, '\u{F01CE}', "gameboard"),    // dice-5
 ];
 
 /// The four world themes, in `Theme::ALL` order.
@@ -188,7 +210,7 @@ const MENU_ITEMS: [&str; 7] = [
 
 /// The help screen's key map (fizzle: no camera numpad, no F12 pack toggle,
 /// no server/account form, no plugin toggles).
-const HELP_LINES: [&str; 78] = [
+const HELP_LINES: [&str; 79] = [
     "World keys (the definitive AC key map; the Esc menu aside):",
     "Movement (client-side sim; the server corrects if it disagrees):",
     "  W / up arrow          forward           X / down arrow       backward",
@@ -237,7 +259,8 @@ const HELP_LINES: [&str; 78] = [
     "                        picked up, a chest / corpse opens to loot, a player",
     "                        opens a trade)",
     "  scroll wheel          scroll the active list; over the pack grid, scroll",
-    "                        its items; over the vendor box, scroll its list",
+    "                        its items; over the vendor box, scroll its list;",
+    "                        over the 3D view, zoom the camera in / out",
     "  right-click           target + examine the item / object under the cursor",
     "  glyph row             open that multi widget",
     "  Spells / Keys bar     select the slot",
@@ -481,6 +504,10 @@ fn draw_world(f: &mut Frame, app: &mut App) {
     } else {
         draw_tactical(f, app, lb);
     }
+    // An open book overlays the world pane (modal reading/editing).
+    if app.world.book.as_ref().is_some_and(|b| b.open) {
+        draw_book(f, app, lb);
+    }
     if app.world.vendor.guid != 0 {
         draw_box(
             f,
@@ -535,10 +562,68 @@ fn draw_world(f: &mut Frame, app: &mut App) {
     );
     draw_multi(f, app, lb, area.width);
     draw_selector(f, app, lb, area.width);
-    draw_slot_bar(f, app, key_y0, lb, "Spells:", app.world.skills.slot);
-    draw_slot_bar(f, app, key_y0 + 1, lb, "Keys:", app.hotkey_sel);
+    {
+        let tab = app.world.skills.tab;
+        let spell_vals: Vec<char> = (0..10).map(|i| {
+            let has = app
+                .world
+                .skills
+                .spell_bar
+                .get(tab)
+                .and_then(|t| t.get(i))
+                .copied()
+                .unwrap_or(0)
+                != 0;
+            if has { SLOTS[i] } else { '-' }
+        }).collect();
+        draw_slot_bar(f, app, key_y0, lb, "Spells:", app.world.skills.slot, &spell_vals);
+        draw_slot_bar(f, app, key_y0 + 1, lb, "Keys:", app.hotkey_sel, &SLOTS);
+    }
     // The solid reverse status bar on the bottom row.
     draw_status_bar(f, app, area.width);
+}
+
+/// The open book (overlaying the world pane): the current page text (or the
+/// edit buffer), the page metadata, and the key hints.
+fn draw_book(f: &mut Frame, app: &mut App, lb: WLayout) {
+    let Some(b) = app.world.book.as_ref() else {
+        return;
+    };
+    let title = format!("Book: {} [p{}]", b.name, b.current + 1);
+    draw_box(f, app, 0, lb.world_y0, lb.left_w, lb.world_y1, &title, true);
+    let inner_w = lb.left_w.saturating_sub(4) as usize;
+    let meta_row = lb.world_y0 + 1;
+    let hint_row = lb.world_y1 - 1;
+    let shown = b.pages.get(b.current).map(|p| p.index).unwrap_or((b.current + 1) as u32);
+    put(
+        f,
+        meta_row,
+        2,
+        trunc(&format!("by {}  page {} of {}  [{}p max {}c]", b.author, shown, b.pages.len().max(1), b.max_pages, b.max_chars), inner_w),
+        dark(app),
+    );
+    let mut r = lb.world_y0 + 2;
+    if !b.inscription.is_empty() {
+        put(f, r, 2, trunc(&b.inscription, inner_w), dark(app));
+        r += 1;
+    }
+    let text: &str = if b.editing {
+        &b.buffer
+    } else {
+        b.pages.get(b.current).map(|p| p.text.as_str()).unwrap_or("(blank)")
+    };
+    let sty = if b.editing { focus(app) } else { normal(app) };
+    let text_rows = hint_row.saturating_sub(r) as usize;
+    for line in text.split('\n').take(text_rows) {
+        put(f, r, 2, trunc(line, inner_w), sty);
+        r += 1;
+    }
+    let hint = if b.editing {
+        "enter save | esc done"
+    } else {
+        "up/dn page | e edit | a add | d del | r fetch | esc close"
+    };
+    put(f, hint_row, 2, trunc(hint, inner_w), dark(app));
 }
 
 // ---------------------------------------------------------------- vitals
@@ -744,12 +829,28 @@ fn draw_world3d(f: &mut Frame, app: &mut App, lb: WLayout) {
 
 /// The bodies to render: every positioned entity with a body (players
 /// always; creatures / ground items / doors / containers by item type). The
-/// self actor is not rendered — fizzle's state carries no self setup/model
-/// (movement owns only pos/heading) and the camera follows it anyway.
+/// self actor uses the movement sim's live pos/heading (the entity's own pos
+/// lags the last server update) and a gold glow.
 fn build_actors(app: &App) -> Vec<Actor> {
     let mut actors: Vec<Actor> = Vec::new();
+    let (_self_cell, self_pos) = app.self_position();
+    let self_heading = app.movement.as_ref().map(|m| m.heading).unwrap_or(0.0);
     for e in app.world.entities.values() {
         if Some(e.guid) == app.self_guid {
+            let half = self_heading / 2.0;
+            actors.push(Actor {
+                guid: e.guid,
+                x: self_pos.x,
+                y: self_pos.y,
+                z: self_pos.z,
+                quat: [half.cos(), 0.0, 0.0, half.sin()],
+                mtable_id: e.mtable_id,
+                setup_id: e.setup_id,
+                model_parts: e.model_parts.clone(),
+                motion_cmd: e.motion_cmd,
+                style: 0,
+                glow: Some(GLOW_SELF),
+            });
             continue;
         }
         if !e.is_player
@@ -962,7 +1063,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, w: u16) {
         let talk = if app.talk_to.is_some() { "talk" } else { "chat" };
         status = format!(" {t} | {talk}> {}_", app.chat_buf);
     } else {
-        let combat = if app.combat_mode == 2 { "combat" } else { "peace" };
+        let combat = if app.world.combat.mode == combat_mode::NON_COMBAT { "peace" } else { "combat" };
         let t = target_readout(app);
         let mid = format!(" | {combat} | {t}");
         let conn = format!("srv: {} | acc: {}", app.server_name, app.account);
@@ -1073,7 +1174,7 @@ fn item_glyph_of_guid(app: &App, guid: u32) -> char {
     '?'
 }
 
-/// The plain glyph for an item type (first matching flag).
+/// The Nerd Font glyph for an item type (first matching flag).
 fn item_glyph(t: u32) -> char {
     for (flag, g, _n) in ITEM_TYPES {
         if t & flag != 0 {
@@ -1141,62 +1242,57 @@ fn draw_allegiance(f: &mut Frame, app: &App, x0: u16, y0: u16, rows: usize, inne
             mrow(f, app, x0, y0, rows, inner_w, 1, &format!("level: {}", a.level), normal(app));
         }
     }
+    mrow(f, app, x0, y0, rows, inner_w, rows.saturating_sub(1), "v swear to target | m break w/ target", dark(app));
 }
 
 fn draw_fellowship(f: &mut Frame, app: &App, x0: u16, y0: u16, rows: usize, inner_w: usize) {
     let Some(fe) = app.world.social.fellowship.as_ref() else {
         mnote(f, app, x0, y0, rows, inner_w, 0, "not in a fellowship");
+        mrow(f, app, x0, y0, rows, inner_w, rows.saturating_sub(1), "/fellowship <name> create | /fellowship quit", dark(app));
         return;
     };
-    mrow(f, app, x0, y0, rows, inner_w, 0, &format!("leader: {}", fe.leader), focus(app));
+    let open = if fe.open { "open" } else { "closed" };
+    mrow(f, app, x0, y0, rows, inner_w, 0, &format!("leader: {} ({open})", fe.leader), focus(app));
     for (i, m) in fe.members.iter().enumerate() {
         if i < app.list_scroll {
             continue;
         }
         let row = 1 + (i - app.list_scroll);
-        if row >= rows.saturating_sub(1) {
+        if row >= rows.saturating_sub(2) {
             break;
         }
         mrow(f, app, x0, y0, rows, inner_w, row, m, normal(app));
     }
-    let shown = fe.members.len().saturating_sub(app.list_scroll).min(rows.saturating_sub(2).max(0));
+    let shown = fe.members.len().saturating_sub(app.list_scroll).min(rows.saturating_sub(3).max(0));
     if fe.members.len() > app.list_scroll + shown {
-        mrow(
-            f,
-            app,
-            x0,
-            y0,
-            rows,
-            inner_w,
-            rows.saturating_sub(2),
-            &format!("+{} more", fe.members.len() - app.list_scroll - shown),
-            dark(app),
-        );
+        mrow(f, app, x0, y0, rows, inner_w, rows.saturating_sub(2), &format!("+{} more", fe.members.len() - app.list_scroll - shown), dark(app));
     }
-    mrow(f, app, x0, y0, rows, inner_w, rows.saturating_sub(1), &format!("{} members", fe.members.len()), dark(app));
+    mrow(f, app, x0, y0, rows, inner_w, rows.saturating_sub(1), "v recruit | m dismiss | n lead | p open", dark(app));
 }
 
 fn draw_friends(f: &mut Frame, app: &App, x0: u16, y0: u16, rows: usize, inner_w: usize) {
     let friends = &app.world.social.friends;
     if friends.is_empty() {
         mnote(f, app, x0, y0, rows, inner_w, 0, "no friends");
+        mrow(f, app, x0, y0, rows, inner_w, rows.saturating_sub(1), "/friend <name> to add", dark(app));
         return;
     }
     mrow(f, app, x0, y0, rows, inner_w, 0, &format!("{} friends", friends.len()), normal(app));
-    let cap = rows.saturating_sub(2);
+    let cap = rows.saturating_sub(3);
     for (i, m) in friends.iter().enumerate() {
         if i < app.list_scroll {
             continue;
         }
         let row = 1 + (i - app.list_scroll);
-        if row >= rows {
+        if row >= rows.saturating_sub(2) {
             break;
         }
         mrow(f, app, x0, y0, rows, inner_w, row, m, normal(app));
     }
     if friends.len() > app.list_scroll + cap {
-        mrow(f, app, x0, y0, rows, inner_w, rows.saturating_sub(1), &format!("+{} more", friends.len() - app.list_scroll - cap), dark(app));
+        mrow(f, app, x0, y0, rows, inner_w, rows.saturating_sub(2), &format!("+{} more", friends.len() - app.list_scroll - cap), dark(app));
     }
+    mrow(f, app, x0, y0, rows, inner_w, rows.saturating_sub(1), "m remove target | /friend <name> add", dark(app));
 }
 
 fn draw_squelch(f: &mut Frame, app: &App, x0: u16, y0: u16, rows: usize, inner_w: usize) {
@@ -1259,7 +1355,7 @@ fn draw_spellbook(f: &mut Frame, app: &App, x0: u16, y0: u16, rows: usize, inner
         rows,
         inner_w,
         rows.saturating_sub(1),
-        &format!("keys 1-9,0 (slot {}) tab {}/8", SLOTS[sk.slot.min(9)], sk.tab + 1),
+        &format!("slot {} tab {}/8 | p add m rm v forget", SLOTS[sk.slot.min(9)], sk.tab + 1),
         dark(app),
     );
 }
@@ -1540,8 +1636,23 @@ fn draw_inventory(f: &mut Frame, app: &App, x0: u16, y0: u16, rows: usize, inner
             );
         }
     }
-    // Pack icon column: the single main pack's icon, reversed (displayed).
+    // Pack icon column: the main pack's icon (reversed = displayed), then
+    // each side pack's icon (click one to open it; the open one is focused).
     put(f, y0 + 1 + INV_GRID_R0, x0 + 1 + icon_x as u16, "b", reverse(app));
+    for (i, &guid) in inv.packs.iter().enumerate() {
+        let row = y0 + 1 + INV_GRID_R0 + 1 + i as u16;
+        if (row - y0) as usize >= rows {
+            break;
+        }
+        let glyph = inv
+            .pack
+            .iter()
+            .find(|it| it.guid == guid)
+            .map(|it| item_glyph(it.item_type).to_string())
+            .unwrap_or_else(|| "?".into());
+        let open = app.world.container.guid == guid;
+        put(f, row, x0 + 1 + icon_x as u16, &glyph, if open { focus(app) } else { normal(app) });
+    }
 }
 
 // ---------------------------------------------------------------- you / examine
@@ -1613,6 +1724,32 @@ fn draw_you(f: &mut Frame, app: &App, x0: u16, y0: u16, rows: usize, inner_w: us
         ),
         normal(app),
     );
+    let ping = app
+        .world
+        .ping_rtt_ms
+        .map(|ms| format!("{ms:.0} ms"))
+        .unwrap_or_else(|| "????".to_string());
+    let c = &app.world.combat;
+    let height = match c.height {
+        1 => "low",
+        3 => "high",
+        _ => "med",
+    };
+    mrow(f, app, x0, y0, rows, inner_w, 4, &format!("ping {ping}  {}", crate::app::combat_mode_name(c.mode)), normal(app));
+    mrow(f, app, x0, y0, rows, inner_w, 5, &format!("atk h{height} {}%  stance {}", (c.power * 100.0).round() as u32, stance_name(c.stance)), normal(app));
+    let vitae = app.world.vitals.vitae.map(|v| format!("{:.0}%", v * 100.0)).unwrap_or_else(|| "-".to_string());
+    mrow(f, app, x0, y0, rows, inner_w, 6, &format!("xp {}  vitae {vitae}", app.world.vitals.xp), normal(app));
+}
+
+/// The display name of a stance motion command.
+fn stance_name(cmd: u32) -> &'static str {
+    match cmd {
+        acproto::motion::command::READY => "ready",
+        acproto::motion::command::SITTING => "sitting",
+        acproto::motion::command::CROUCH => "crouching",
+        acproto::motion::command::SLEEPING => "sleeping",
+        _ => "none",
+    }
 }
 
 /// The Examine widget: the appraised target's identity, item metadata,
@@ -1813,8 +1950,8 @@ fn selector_start(x0: u16, x1: u16, n: usize) -> u16 {
     x0 + if n <= wcol - 2 { ((wcol - n) / 2) as u16 } else { 1 }
 }
 
-/// The small selector: one plain glyph per multi widget on the multi box's
-/// bottom border row, the current one reversed.
+/// The small selector: one Nerd Font icon per multi widget on the multi
+/// box's bottom border row, the current one reversed.
 fn draw_selector(f: &mut Frame, app: &App, lb: WLayout, wcols: u16) {
     let start = selector_start(lb.right_x, wcols, 14);
     for i in 0..14 {
@@ -1845,12 +1982,15 @@ fn slot_cols(x0: u16, w: u16, label: &str) -> Vec<u16> {
     out
 }
 
-/// One spell/hotkey slot bar (right column, bottom of the layout).
-fn draw_slot_bar(f: &mut Frame, app: &mut App, row: u16, lb: WLayout, label: &str, sel: usize) {
+/// One spell/hotkey slot bar (right column, bottom of the layout). Each
+/// slot shows a filled marker (`values[i]`) or a dash when empty; the
+/// selected slot is reversed.
+fn draw_slot_bar(f: &mut Frame, app: &mut App, row: u16, lb: WLayout, label: &str, sel: usize, values: &[char]) {
     put(f, row, lb.right_x, label, normal(app));
     for (i, gc) in slot_cols(lb.right_x, lb.right_w, label).iter().enumerate() {
         put(f, row, gc - 1, " ", normal(app));
-        put(f, row, *gc, &SLOTS[i].to_string(), if i == sel { reverse(app) } else { normal(app) });
+        let c = values.get(i).copied().unwrap_or('-');
+        put(f, row, *gc, &c.to_string(), if i == sel { reverse(app) } else { normal(app) });
     }
 }
 // ---------------------------------------------------------------- vendor
@@ -3091,6 +3231,28 @@ fn inv_pack_icon_at(lb: WLayout, r: u16, c: u16, wcols: u16) -> bool {
     rel_c == inner_w - 1 && rel_r == INV_GRID_R0 as usize
 }
 
+/// The index of a side pack's icon under a cell (the icon column, rows below
+/// the main pack icon), or `None`.
+fn side_pack_icon_at(app: &App, lb: WLayout, r: u16, c: u16, wcols: u16) -> Option<usize> {
+    if app.multi_sel != INV_WIDGET {
+        return None;
+    }
+    let inner_x0 = lb.right_x + 1;
+    let inner_y0 = lb.radar_h + 1;
+    if r < inner_y0 || c < inner_x0 {
+        return None;
+    }
+    let rel_r = (r - inner_y0) as usize;
+    let rel_c = (c - inner_x0) as usize;
+    let inner_w = (wcols - lb.right_x - 2) as usize;
+    let rows = (lb.multi_y1 - lb.radar_h - 2) as usize;
+    if rel_r >= rows || rel_c >= inner_w || rel_c != inner_w - 1 {
+        return None;
+    }
+    let idx = rel_r.checked_sub((INV_GRID_R0 as usize) + 1)?;
+    (idx < app.world.inventory.packs.len()).then_some(idx)
+}
+
 /// A paper-doll structural slot (drop target for equipping), under a cell.
 fn doll_drop_at(lb: WLayout, r: u16, c: u16, wcols: u16) -> bool {
     let inner_x0 = lb.right_x + 1;
@@ -3359,6 +3521,11 @@ fn left_down(app: &mut App, area: Rect, r: u16, c: u16) {
     if app.multi_sel == INV_WIDGET && inv_pack_icon_at(lb, r, c, area.width) {
         return;
     }
+    // A side pack's icon: open it (the loot view shows its contents).
+    if let Some(idx) = side_pack_icon_at(app, lb, r, c, area.width) {
+        app.open_side_pack(idx);
+        return;
+    }
     // Vendor / trade / loot widget box.
     if widget_active(app)
         && r >= lb.widget_y0 + 1
@@ -3379,7 +3546,9 @@ fn left_down(app: &mut App, area: Rect, r: u16, c: u16) {
     if r >= lb.world_y0 + 1 && r <= lb.world_y1 - 2 && c >= 1 && c <= lb.left_w - 2 {
         if let Some(guid) = pick_world_at(app, lb, r, c) {
             set_target_by_guid(app, guid);
-            if app.combat_mode == 2 && target_kind_for(app, guid) == 0 {
+            if (app.world.combat.mode == combat_mode::MELEE
+                || app.world.combat.mode == combat_mode::MISSILE)
+                && target_kind_for(app, guid) == 0 {
                 app.attack();
             }
             let now = Instant::now();
@@ -3396,8 +3565,7 @@ fn left_down(app: &mut App, area: Rect, r: u16, c: u16) {
     if r == lb.multi_y1 && c >= lb.right_x {
         let i = (c as usize).saturating_sub(selector_start(lb.right_x, area.width, 14) as usize);
         if i < 14 && i != app.multi_sel {
-            app.multi_sel = i;
-            app.list_scroll = 0;
+            app.open_widget(i);
         }
         return;
     }
@@ -3610,6 +3778,18 @@ fn wheel(app: &mut App, area: Rect, r: u16, c: u16, up: bool) {
     let Some(lb) = world_layout(area.height, area.width, widget_active(app)) else {
         return;
     };
+    // 3D view: scrolling over the world pane zooms the camera in (up) / out
+    // (down) rather than scrolling a list.
+    if app.world_view && c < lb.left_w && r >= lb.world_y0 && r <= lb.world_y1 {
+        if let Some(w) = app.world3d.as_mut() {
+            if up {
+                w.zoom_in();
+            } else {
+                w.zoom_out();
+            }
+        }
+        return;
+    }
     if app.world.vendor.guid != 0 && c <= lb.left_w - 1 {
         let y = r - lb.widget_y0;
         if y == 2 {
@@ -3733,8 +3913,7 @@ fn view_press(app: &mut App, view: MenuView, r: u16, c: u16, h: u16, w: u16) {
             app.world.flash = Some(format!("theme: {}", app.theme.name()));
         }
         MenuView::Widgets => {
-            app.multi_sel = app.widget_sel;
-            app.list_scroll = 0;
+            app.open_widget(app.widget_sel);
         }
         MenuView::WorldView => {
             app.world_view = app.worldview_sel == 1;
@@ -4092,4 +4271,63 @@ fn draw_center_box(f: &mut Frame, app: &App, title: &str, lines: &[&str], title_
     );
     f.render_widget(p, rect);
     f.set_cursor_position((rect.x + 1, rect.y + 1));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{item_glyph, ITEM_TYPES, WIDGET_GLYPHS};
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Style;
+
+    /// Every icon: the 14 widget-selector glyphs + the 31 item-type glyphs.
+    fn all_icons() -> Vec<char> {
+        let mut v = WIDGET_GLYPHS.to_vec();
+        v.extend(ITEM_TYPES.iter().map(|&(_, g, _)| g));
+        v
+    }
+
+    /// Every icon must occupy exactly one terminal cell when placed through
+    /// ratatui (the real rendering path); otherwise the pack grid, paper doll,
+    /// vendor/loot lists and the one-row widget selector would misalign. A
+    /// 0- or 2-width glyph shifts the grid.
+    #[test]
+    fn icons_are_single_cell() {
+        let icons = all_icons();
+        assert_eq!(icons.len(), WIDGET_GLYPHS.len() + ITEM_TYPES.len());
+        for g in icons {
+            let mut buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, 8, 1));
+            let (x, _) = buf.set_stringn(0, 0, &g.to_string(), 8, Style::default());
+            assert_eq!(x, 1, "U+{:05X} must be 1 cell wide", g as u32);
+        }
+    }
+
+    /// Every icon must be a Material Design Icon in the Nerd Fonts v3 range
+    /// (0xF0001-0xF1AF0, the Supplementary PUA) — distinct from Powerline and
+    /// Font Awesome (BMP PUA), and guaranteed single-cell.
+    #[test]
+    fn icons_are_in_mdi_range() {
+        for g in all_icons() {
+            let cp = g as u32;
+            assert!(
+                (0xF0001..=0xF1AF0).contains(&cp),
+                "U+{cp:05X} is outside the Nerd Font MDI range",
+            );
+        }
+    }
+
+    /// Each item-type flag must resolve (first matching flag) to exactly its
+    /// own table glyph — catching ordering/masking regressions — and an
+    /// unknown type (0) falls back to '?'.
+    #[test]
+    fn item_flags_resolve_to_their_icons() {
+        for (flag, g, _name) in ITEM_TYPES {
+            assert_eq!(
+                item_glyph(flag),
+                g,
+                "flag 0x{flag:x} should map to U+{:05X}",
+                g as u32,
+            );
+        }
+        assert_eq!(item_glyph(0), '?');
+    }
 }

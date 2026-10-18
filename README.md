@@ -2,10 +2,14 @@
 
 A terminal client for the [ACE](https://asheron.us) (Asheron's Call) server
 protocol, written in Rust. It logs in, creates/selects characters, enters the
-world, and supports movement (with terrain and door collision), melee combat,
-spells, chat, targeting, appraise, a radar, vitals, death/respawn, a 3D world
-view, an inventory paper-doll, the Dereth continent map, vendor/trade/loot,
-and logout — verified against a live ACE server.
+world, and supports movement (with terrain and door collision); melee,
+missile, and magic combat (with attack height/power and spell slots/tabs);
+stances and soul emotes; chat, tells, channels, and emote chat; targeting,
+appraise, and live target health; fellowship, allegiance, and friends;
+books (read/write pages); a radar; vitals (including XP and Vitae); death and
+respawn; a 3D world view (with the local character rendered as an actor); an
+inventory paper-doll with side packs; the Dereth continent map; vendor/trade/
+loot; and logout — verified against a live ACE server.
 
 ## Workspace
 
@@ -39,6 +43,16 @@ Options:
 
 Profiles (servers + accounts) are persisted under the user config dir, so a
 second run can just `cargo run -p fizzle` and reuse the active entry.
+
+## Icons (Nerd Fonts)
+
+Item icons (pack grid, paper doll, vendor/trade/loot, ground, drag marker)
+and the right-column one-row widget selector use Nerd Font *Material Design
+Icon* glyphs (`nf-md-*`, code points 0xF0001-0xF1AF0). Run fizzle in a
+terminal whose font is a [Nerd Font](https://www.nerdfonts.com/) to see them
+as icons. Every glyph occupies exactly one cell, so the pack grid, paper
+doll, and lists stay aligned in any terminal — in a non-Nerd-Font terminal
+they simply render as empty/tofu boxes.
 
 ## Controls
 
@@ -74,17 +88,54 @@ continues.
 | `F` | pick up the target (ground container; pack item → main pack) |
 | `R` | use the target (container → pick up; NPC → talk dialog) |
 | `E` | examine the target (works from any widget) |
-| `T` | attack the target (melee; combat stance first) |
+| `T` | attack the target in the current combat mode (melee or missile) |
 | `` ` `` | toggle combat / peace mode (sent to the server) |
 
-**Spells:** `1-9,0` select spell slots 1-10; `Del`/`PgDn` step the previous
-spell / next spell; `End` starts casting; `Ins`/`PgUp` switch spell tabs.
+**Combat hotkeys** — the `` ` `` toggle cycles between Peace and your
+character's default combat mode (melee, missile, or magic by equipped
+weapon). The numeric / edit keys are scoped to the active mode:
+
+| Key | Melee / Missile | Magic |
+|-----|-----------------|-------|
+| `1-9,0` | item quickslot (not used) | select spell slots 1-10 |
+| `Ins` | power − | previous spell slot |
+| `PgUp` | power + | previous spell tab |
+| `Del` | attack height: low | next spell slot |
+| `End` | attack height: medium | cast the selected spell |
+| `PgDn` | attack height: high | next spell tab |
+
+Attack power is quantized to 7 steps (0-100%, default 50%); height is
+low/medium/high (default medium).
+
+**Stances:** `Y` ready, `G` sit, `H` crouch, `B` sleep (sent to the server
+as a movement substate).
+
+**Emotes** (soul emotes): `K` point, `I` laugh, `J` wave, `O` cheer, `U` cry.
+
+**Social actions** — the right-column panel selects which keys are active
+(the actions act on the current target, which must be a player):
+
+| Panel | Key | Action |
+|-------|-----|--------|
+| Allegiance | `v` / `m` | swear to / break allegiance with the target |
+| Fellowship | `v` / `m` / `n` / `p` | recruit / dismiss / make new leader / toggle openness (target) |
+| Friends | `m` | remove the target as a friend |
+| Spellbook | `p` / `m` / `v` | add to / remove from / forget the selected spell |
+
+Fellowship create/quit and friend add take a name via chat: `/fellowship
+<name>`, `/fellowship quit`, `/friend <name>`.
+
+**Books** (modal) — `R` on a book opens it. While open: `↑`/`j` and
+`↓`/`k` change page, `e` edit (then type; `Enter` saves, `Esc` cancels),
+`a` add a page, `d` delete the page, `r` refetch the page, `Esc` close.
 
 **UI:** `Enter`/`Tab` open chat (Enter sends, Tab or Esc closes it); `F1`
 help; `Esc` menu; `Shift+Esc` log out of the world.
 
-Chat commands (typed while chat is focused, sent with `Enter`): `@t`/`@tell`
-tell a player; every other `/` or `@` command is passed to the server as-is.
+Chat commands (typed while chat is focused, sent with `Enter`): `/t <name>
+<text>` tell a player; `:text` (or `;text`) emote chat; `/ch <channel>
+<text>` a channel; every other `/` or `@` command (e.g. `/lifestone`,
+`@acehelp`) is passed to the server as-is.
 
 ## Mouse
 
@@ -96,11 +147,15 @@ and loot widgets are driven entirely by the mouse:
 - **left double-click** — use the target under the cursor (a ground item is
   picked up, a chest/corpse opens to loot, a player opens a trade).
 - **scroll wheel** — scroll the active list; over the pack grid scroll its
-  items; over the vendor box scroll its list.
+  items; over the vendor box scroll its list; over the 3D view zoom the
+  camera in (scroll up) / out (scroll down).
 - **right-click** — target + examine the item/object under the cursor.
 - **glyph row / Spells / Keys bar** — open that multi widget / select the slot.
 - **drag & drop** — onto the pack icon column, trade, vendor, paper doll
   (equip), pack, player, or the ground.
+- **inventory icon column** — the rightmost column of the inventory widget
+  holds one icon per side pack you own; clicking an icon opens that pack as a
+  loot view (its contents are already merged into the main pack list).
 - **menu / list rows** — click moves the selection, double-click activates.
 
 ## Menu, themes, world view
@@ -115,12 +170,14 @@ Themes, Widgets, World view, Actor glow, Help, Log out, and Quit.
   Fellowship, Friends, Squelch, Spellbook, Attributes, Skills, Titles,
   Contracts, Map, House, Inventory, You, Examine).
 - **World view** — the world pane's render mode: *tactical* (north-up
-  top-down map) or *3d* (realtime 3D, needs the retail DATs).
+  top-down map) or *3d* (realtime 3D, needs the retail DATs). In 3D, the
+  scroll wheel dollies the camera (closer/lower to farther/higher); the
+  distance is clamped to a readable range and never passes through walls.
 - **Actor glow** — a halo around characters in the 3D view (on/off).
 
-Theme, world view, and actor-glow choices are session-only: they apply live
-but are not written back to the profile on exit (only servers and accounts
-are persisted).
+Theme, world view, and actor-glow choices apply live and are written back to
+the profile on exit, so the next launch picks them up (alongside the saved
+servers and accounts).
 
 ## DAT files (3D, collision, Dereth map)
 
@@ -204,14 +261,46 @@ absent) and asserts the 3D output is shaded, not a uniform fill.
 
 ## Known gaps
 
-- Theme, world view, and actor-glow choices are session-only (not written
-  back to the profile on exit).
+Things the retail client does that fizzle intentionally does not, because a
+terminal TUI has no place for them:
+
+- **Rendering beyond the 3D world pane** — no D3D device, no full-screen UI
+  windows, no UI window layout persistence, no screenshot capture.
+- **Audio** — no sound.
+- **Input devices** — no joystick/DirectInput support (keyboard + mouse only).
+- **Internationalization** — no DBCS/IME (single-byte ASCII input).
+- **Plugin host** — no `theapdll` plugin loading.
+- **Retail infrastructure** — no Keystone billing, no self-patcher.
+- **Dedicated retail UIs** — ProfilerUI, the character appearance editor, the
+  house property GUI, chess, the consent list, and PK arenas are not
+  implemented.
+
+Gaps driven by the protocol or the reference client's scope:
+
 - In a trade, the other player's item names are not shown (the server does
   not send them).
-- Side packs are flattened into the main pack grid (no separate pack widgets).
-- The local character is not drawn as an actor in the 3D view.
 - Some parsed item metadata (per-item coin value, capacity, sell price, icon
   id) is decoded but not displayed — matching the reference client's scope.
+
+Documented deviations from retail (behavioral choices, not omissions):
+
+- **Cast targeting without a SpellTable** — with no retail `SpellTable.dat`
+  on hand, a cast is aimed at the current combat target if one is selected,
+  otherwise sent untargeted; the server validates either way.
+- **Game ping cadence** — a game ping is sent every 10 s (retail pings on a
+  slightly different timer).
+- **Stances** — a stance change is a `MoveToState` with a forward command at
+  0.0 speed (the same motion mechanism retail uses).
+- **Soul emotes** — sent via the soul-emote motion body with the sequence
+  masked to the low 15 bits (`0x7FFF`), as the retail motion path does.
+- **Attack power** — defaults to 0.5 (medium) and quantizes to the retail 7
+  power levels.
+- **Book UI** — the book reader is a modal overlay over the world pane rather
+  than a separate window.
+- **Social actions** — member-directed actions (fellowship, friends) act on
+  the current target and are gated by the active social panel, since a TUI
+  has no per-member list cursor.
+- **Idle logout** — the client logs out after 1200 s of no input.
 
 ## Resources
 

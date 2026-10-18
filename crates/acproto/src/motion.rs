@@ -27,6 +27,12 @@ pub mod command {
     pub const TURN_LEFT: u32 = 0x6500_000E;
     pub const SIDESTEP_RIGHT: u32 = 0x6500_000F;
     pub const SIDESTEP_LEFT: u32 = 0x6500_0010;
+    /// Crouched (rides the forward command field; MovementCommand substate).
+    pub const CROUCH: u32 = 0x4100_0012;
+    /// Sitting (substate).
+    pub const SITTING: u32 = 0x4100_0013;
+    /// Sleeping (substate).
+    pub const SLEEPING: u32 = 0x4100_0014;
     /// Door opened (MotionCommand::On, rides the forward command field).
     pub const DOOR_ON: u32 = 0x4000_000B;
     /// Door closed (MotionCommand::Off).
@@ -79,6 +85,44 @@ impl MoveToState {
         w.u8(self.flags);
         w.out
     }
+}
+
+/// Packed flags for a MoveToState carrying one command-list entry
+/// (`CommandListLength` = PackedFlags >> 11): all 11 motion fields plus a
+/// single MotionItem.
+pub const PACKED_FLAGS_WITH_COMMAND: u32 = PACKED_FLAGS_ALL | (1 << 11);
+
+/// The body of a MoveToState (0xF61C) that performs one soul emote: the 11
+/// idle motion fields, a single command-list item (`u16 rawCommand, u16
+/// packedSequence, f32 speed`), then position + 4 u16 + 1 u8 = 97 bytes.
+///
+/// The server only accepts commands from its SoulEmotes set at exactly
+/// speed 1.0 (anything else is logged as a non-standard action).
+/// `seq` is the 15-bit motion sequence; the high (autonomous) bit is set
+/// here because the client initiated it.
+#[must_use]
+pub fn soul_emote_body(pos: &Position, contact: bool, raw_command: u16, seq: u16) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(PACKED_FLAGS_WITH_COMMAND);
+    w.u32(hold_key::NONE);
+    w.u32(MOTION_STYLE);
+    w.u32(command::READY);
+    w.u32(hold_key::NONE);
+    w.f32(0.0);
+    w.u32(command::READY); // sidestep
+    w.u32(hold_key::NONE);
+    w.f32(0.0);
+    w.u32(command::READY); // turn
+    w.u32(hold_key::NONE);
+    w.f32(0.0);
+    // Command list: one MotionItem.
+    w.u16(raw_command);
+    w.u16(seq | 0x8000);
+    w.f32(1.0);
+    pos.pack(&mut w);
+    w.zeros(8); // 4 x u16
+    w.u8(contact as u8);
+    w.out
 }
 
 /// The body of the AutonomousPosition 0xF753 action: 32 B position + 4 u16 +
@@ -262,6 +306,38 @@ mod tests {
         d[11] = 3;
         let e = parse_motion(&d).unwrap();
         assert!(e.commands.is_empty());
+    }
+
+    #[test]
+    fn soul_emote_body_layout() {
+        let b = soul_emote_body(&Position::default(), true, 0x00F0, 37);
+        assert_eq!(b.len(), 97); // 89-byte MoveToState + 8-byte MotionItem
+        let mut r = Reader::new(&b);
+        assert_eq!(r.u32(), PACKED_FLAGS_WITH_COMMAND);
+        assert_eq!(r.u32(), hold_key::NONE);
+        assert_eq!(r.u32(), MOTION_STYLE);
+        assert_eq!(r.u32(), command::READY);
+        assert_eq!(r.u32(), hold_key::NONE);
+        assert!((r.f32() - 0.0).abs() < f32::EPSILON);
+        assert_eq!(r.u32(), command::READY);
+        assert_eq!(r.u32(), hold_key::NONE);
+        assert!((r.f32() - 0.0).abs() < f32::EPSILON);
+        assert_eq!(r.u32(), command::READY);
+        assert_eq!(r.u32(), hold_key::NONE);
+        assert!((r.f32() - 0.0).abs() < f32::EPSILON);
+        // Command list item.
+        assert_eq!(r.u16(), 0x00F0); // Point
+        assert_eq!(r.u16(), 37 | 0x8000); // autonomous bit
+        assert!((r.f32() - 1.0).abs() < f32::EPSILON);
+        // Position (32) + 4 u16 + contact.
+        assert_eq!(r.remaining(), 41);
+        let pos = Position::unpack(&mut r);
+        assert_eq!(pos, Position::default());
+        assert_eq!(r.remaining(), 9);
+        for _ in 0..4 {
+            assert_eq!(r.u16(), 0);
+        }
+        assert_eq!(r.u8(), 1);
     }
 
 }

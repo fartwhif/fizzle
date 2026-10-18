@@ -161,6 +161,16 @@ impl World3D {
         self.scene.available()
     }
 
+    /// Zoom the 3D camera in (closer) by one wheel notch.
+    pub fn zoom_in(&mut self) {
+        self.zoom.zoom_in();
+    }
+
+    /// Zoom the 3D camera out (farther) by one wheel notch.
+    pub fn zoom_out(&mut self) {
+        self.zoom.zoom_out();
+    }
+
     /// Re-base the static solid geometry on a landblock (no-op when unchanged).
     pub fn set_landblock(&mut self, lb: u32) {
         if lb == self.cur_lb {

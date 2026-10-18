@@ -40,7 +40,11 @@ pub mod opcode {
     pub const SERVER_NAME: u32 = 0xF7E1;
     pub const DDD_INTERROGATION: u32 = 0xF7E5;
     pub const HEAR_SPEECH: u32 = 0x02BB;
+    /// `EmoteText` (0x01E0) / `SoulEmote` (0x01E2): broadcast emote /
+    /// soul-emote chat. Body: `u32 senderId, String16L senderName,
+    /// String16L emoteText` (identical layout for both).
     pub const EMOTE_TEXT: u32 = 0x01E0;
+    pub const SOUL_EMOTE_MSG: u32 = 0x01E2;
     pub const PLAYER_KILLED: u32 = 0x019E;
     pub const PRIVATE_UPDATE_ATTRIBUTE_2ND_LEVEL: u32 = 0x02E9;
     /// `PrivateUpdateVital` (0x02E7): full vital state for self (ranks/
@@ -84,6 +88,29 @@ pub mod action {
     pub const FELLOWSHIP_UPDATE_REQUEST: u32 = 0x00A6;
     pub const ALLEGIANCE_UPDATE_REQUEST: u32 = 0x001F;
     pub const HOUSE_QUERY: u32 = 0x021E;
+    pub const TARGETED_MISSILE_ATTACK: u32 = 0x000A;
+    pub const ADD_FRIEND: u32 = 0x0018;
+    pub const REMOVE_FRIEND: u32 = 0x0017;
+    pub const SWEAR_ALLEGIANCE: u32 = 0x001D;
+    pub const BREAK_ALLEGIANCE: u32 = 0x001E;
+    pub const CAST_UNTARGETED_SPELL: u32 = 0x0048;
+    pub const CAST_TARGETED_SPELL: u32 = 0x004A;
+    pub const FELLOWSHIP_CREATE: u32 = 0x00A2;
+    pub const FELLOWSHIP_QUIT: u32 = 0x00A3;
+    pub const FELLOWSHIP_DISMISS: u32 = 0x00A4;
+    pub const FELLOWSHIP_RECRUIT: u32 = 0x00A5;
+    pub const BOOK_DATA: u32 = 0x00AA;
+    pub const BOOK_MODIFY_PAGE: u32 = 0x00AB;
+    pub const BOOK_ADD_PAGE: u32 = 0x00AC;
+    pub const BOOK_DELETE_PAGE: u32 = 0x00AD;
+    pub const BOOK_PAGE_DATA: u32 = 0x00AE;
+    pub const REMOVE_SPELL: u32 = 0x01A8;
+    pub const EMOTE: u32 = 0x01DF;
+    pub const SOUL_EMOTE: u32 = 0x01E1;
+    pub const ADD_SPELL_FAVORITE: u32 = 0x01E3;
+    pub const REMOVE_SPELL_FAVORITE: u32 = 0x01E4;
+    pub const FELLOWSHIP_ASSIGN_NEW_LEADER: u32 = 0x0290;
+    pub const FELLOWSHIP_CHANGE_OPENNESS: u32 = 0x0291;
 }
 
 /// `GameEventType` values (S2C events, wrapped in `GAME_EVENT`).
@@ -131,6 +158,13 @@ pub mod event {
     pub const VIEW_CONTENTS: u32 = 0x0196;
     pub const USE_DONE: u32 = 0x01C7;
     pub const ATTACK_DONE: u32 = 0x01A7;
+    pub const BOOK_DATA_RESPONSE: u32 = 0x00B4;
+    pub const BOOK_MODIFY_PAGE_RESPONSE: u32 = 0x00B5;
+    pub const BOOK_ADD_PAGE_RESPONSE: u32 = 0x00B6;
+    pub const BOOK_DELETE_PAGE_RESPONSE: u32 = 0x00B7;
+    pub const BOOK_PAGE_DATA_RESPONSE: u32 = 0x00B8;
+    pub const MAGIC_REMOVE_SPELL: u32 = 0x01A8;
+    pub const MAGIC_UPDATE_SPELL: u32 = 0x02C1;
 }
 
 /// `CombatMode` bitmask (PropertyInt 40 / `CHANGE_COMBAT_MODE` body).
@@ -599,13 +633,25 @@ pub fn body_query_health(guid: u32) -> Vec<u8> {
 }
 
 /// `TARGETED_MELEE_ATTACK` (0x0008) body:
-/// `u32 target, u32 height (2), f32 power (1.0)`.
+/// `u32 target, u32 height (1 Low / 2 Medium / 3 High), f32 power (0..=1)`.
+/// Retail defaults: height Medium (2), power 0.5.
 #[must_use]
-pub fn body_targeted_melee_attack(target: u32) -> Vec<u8> {
+pub fn body_targeted_melee_attack(target: u32, height: u32, power: f32) -> Vec<u8> {
     let mut w = Writer::new();
     w.u32(target);
-    w.u32(2);
-    w.f32(1.0);
+    w.u32(height);
+    w.f32(power);
+    w.out
+}
+
+/// `TARGETED_MISSILE_ATTACK` (0x000A) body:
+/// `u32 target, u32 height (1|2|3), f32 accuracy (0..=1)`.
+#[must_use]
+pub fn body_targeted_missile_attack(target: u32, height: u32, accuracy: f32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(target);
+    w.u32(height);
+    w.f32(accuracy);
     w.out
 }
 
@@ -768,6 +814,199 @@ pub fn body_allegiance_update_request(open: bool) -> Vec<u8> {
 /// (owner) or HouseStatus (u32 weenieError, non-zero = not the owner).
 #[must_use]
 pub fn body_house_query() -> Vec<u8> {
+    Vec::new()
+}
+
+/// `CAST_UNTARGETED_SPELL` (0x0048) body: `u32 spellId`.
+#[must_use]
+pub fn body_cast_untargeted_spell(spell_id: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(spell_id);
+    w.out
+}
+
+/// `CAST_TARGETED_SPELL` (0x004A) body: `u32 targetGuid, u32 spellId`.
+#[must_use]
+pub fn body_cast_targeted_spell(target: u32, spell_id: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(target);
+    w.u32(spell_id);
+    w.out
+}
+
+/// `REMOVE_SPELL` (0x01A8) body: `u32 spellId` (forgets one spell).
+#[must_use]
+pub fn body_remove_spell(spell_id: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(spell_id);
+    w.out
+}
+
+/// `SWEAR_ALLEGIANCE` (0x001D) body: `u32 targetGuid` (the allegiance's
+/// current leader).
+#[must_use]
+pub fn body_swear_allegiance(guid: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(guid);
+    w.out
+}
+
+/// `BREAK_ALLEGIANCE` (0x001E) body: `u32 targetGuid`.
+#[must_use]
+pub fn body_break_allegiance(guid: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(guid);
+    w.out
+}
+
+/// `ADD_FRIEND` (0x0018) body: `String16L name` (player name, not guid).
+#[must_use]
+pub fn body_add_friend(name: &str) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.string16l(name);
+    w.out
+}
+
+/// `REMOVE_FRIEND` (0x0017) body: `u32 guid`.
+#[must_use]
+pub fn body_remove_friend(guid: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(guid);
+    w.out
+}
+
+/// `FELLOWSHIP_CREATE` (0x00A2) body: `String16L name, u32 shareXP`.
+#[must_use]
+pub fn body_fellowship_create(name: &str, share_xp: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.string16l(name);
+    w.u32(u32::from(share_xp));
+    w.out
+}
+
+/// `FELLOWSHIP_QUIT` (0x00A3) body: `u32 disband` (1 = also disband).
+#[must_use]
+pub fn body_fellowship_quit(disband: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(u32::from(disband));
+    w.out
+}
+
+/// `FELLOWSHIP_DISMISS` (0x00A4) body: `u32 guid` (a member).
+#[must_use]
+pub fn body_fellowship_dismiss(guid: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(guid);
+    w.out
+}
+
+/// `FELLOWSHIP_RECRUIT` (0x00A5) body: `u32 guid` (a player).
+#[must_use]
+pub fn body_fellowship_recruit(guid: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(guid);
+    w.out
+}
+
+/// `FELLOWSHIP_ASSIGN_NEW_LEADER` (0x0290) body: `u32 guid`.
+#[must_use]
+pub fn body_fellowship_new_leader(guid: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(guid);
+    w.out
+}
+
+/// `FELLOWSHIP_CHANGE_OPENNESS` (0x0291) body: `u32 open` (1|0).
+#[must_use]
+pub fn body_fellowship_openness(open: bool) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(u32::from(open));
+    w.out
+}
+
+/// `BOOK_DATA` (0x00AA) body: `u32 bookGuid`. Requests the full book.
+#[must_use]
+pub fn body_book_data(guid: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(guid);
+    w.out
+}
+
+/// `BOOK_MODIFY_PAGE` (0x00AB) body: `u32 bookGuid, i32 page, String16L text`.
+#[must_use]
+pub fn body_book_modify_page(guid: u32, page: i32, text: &str) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(guid);
+    w.i32(page);
+    w.string16l(text);
+    w.out
+}
+
+/// `BOOK_ADD_PAGE` (0x00AC) body: `u32 bookGuid`.
+#[must_use]
+pub fn body_book_add_page(guid: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(guid);
+    w.out
+}
+
+/// `BOOK_DELETE_PAGE` (0x00AD) body: `u32 bookGuid, i32 page`.
+#[must_use]
+pub fn body_book_delete_page(guid: u32, page: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(guid);
+    w.i32(page);
+    w.out
+}
+
+/// `BOOK_PAGE_DATA` (0x00AE) body: `u32 bookGuid, i32 page` (0-based).
+#[must_use]
+pub fn body_book_page_data(guid: u32, page: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(guid);
+    w.i32(page);
+    w.out
+}
+
+/// `ADD_SPELL_FAVORITE` (0x01E3) body:
+/// `u32 spellId, u32 position (tab slot), u32 tab`.
+#[must_use]
+pub fn body_add_spell_favorite(spell_id: u32, position: u32, tab: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(spell_id);
+    w.u32(position);
+    w.u32(tab);
+    w.out
+}
+
+/// `REMOVE_SPELL_FAVORITE` (0x01E4) body: `u32 spellId, u32 tab`.
+#[must_use]
+pub fn body_remove_spell_favorite(spell_id: u32, tab: u32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u32(spell_id);
+    w.u32(tab);
+    w.out
+}
+
+/// `EMOTE` (0x01DF) body: `String16L text` (the `/emote` chat path).
+#[must_use]
+pub fn body_emote(text: &str) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.string16l(text);
+    w.out
+}
+
+/// `SOUL_EMOTE` (0x01E1) body: `String16L text` (the `/pose` chat path).
+#[must_use]
+pub fn body_soul_emote(text: &str) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.string16l(text);
+    w.out
+}
+
+/// `PING_REQUEST` (0x01E9) body: empty.
+#[must_use]
+pub fn body_ping_request() -> Vec<u8> {
     Vec::new()
 }
 
@@ -963,6 +1202,8 @@ pub struct PlayerDescription {
     pub spell_bar: Vec<Vec<u32>>,
     /// The spellbookFilters bitmask (one u32, always present).
     pub spell_filters: Vec<u32>,
+    /// Enchantment registry entries (the Vitae entry is spell 666).
+    pub enchantments: Vec<Enchantment>,
     /// (item guid, containerType) from the inventory list.
     pub inventory: Vec<(u32, u32)>,
     /// (item guid, wieldLocation, clothingPriority) from the equipped list.
@@ -1063,6 +1304,15 @@ pub struct Enchantment {
     pub stat_mod_key: u32,
     pub stat_mod_value: f32,
     pub spell_set_id: u32,
+}
+
+/// One page of a book (from `BookDataResponse` 0x00B4 or a separate
+/// `BookPageData` fetch).
+#[derive(Clone, Debug, Default)]
+pub struct BookPage {
+    pub page: u32,
+    pub author: String,
+    pub text: String,
 }
 
 /// A squelch (chat filter) info block: `u32 nFilters, nFilters x u32,
@@ -1407,6 +1657,40 @@ pub enum Event {
     AttackDone {
         code: u32,
     },
+    /// `MagicUpdateSpell` (0x02C1): a spell was learned/updated in the
+    /// spellbook.
+    MagicUpdateSpell {
+        spell_id: u32,
+        layer: u32,
+    },
+    /// `MagicRemoveSpell` (0x01A8): a spell was removed from the spellbook.
+    MagicRemoveSpell {
+        spell_id: u32,
+        layer: u32,
+    },
+    /// `BookDataResponse` (0x00B4): the full book (page metadata + text).
+    BookDataResponse {
+        book_guid: u32,
+        max_pages: u32,
+        max_chars: u32,
+        pages: Vec<BookPage>,
+        inscription: String,
+        author: String,
+    },
+    /// `BookPageDataResponse` (0x00B8): a single page of a book.
+    BookPageDataResponse {
+        book_guid: u32,
+        page: u32,
+        author: String,
+        text: String,
+    },
+    /// `BookModifyPageResponse` (0x00B5) / `BookAddPageResponse` (0x00B6) /
+    /// `BookDeletePageResponse` (0x00B7): a book mutation result.
+    BookMutationResponse {
+        book_guid: u32,
+        page: u32,
+        success: bool,
+    },
 }
 
 /// A fully parsed `GAME_EVENT` (0xF7B0) message.
@@ -1454,6 +1738,13 @@ pub enum Incoming {
     ServerMessage {
         text: String,
         chat_type: u32,
+    },
+    /// `EmoteText` (0x01E0) / `SoulEmote` (0x01E2): a broadcast emote or
+    /// soul emote from a player (including self).
+    EmoteText {
+        sender_id: u32,
+        sender: String,
+        text: String,
     },
     /// `PlayerKilled` (0x019E): broadcast when a player dies, including to self.
     PlayerKilled {
@@ -1597,6 +1888,16 @@ pub fn parse_incoming(data: &[u8]) -> Option<Incoming> {
             let distance = r.f32();
             let chat_type = r.u32();
             Some(Incoming::HearRangedSpeech { text, sender, sender_id, distance, chat_type })
+        }
+        opcode::EMOTE_TEXT | opcode::SOUL_EMOTE_MSG => {
+            // u32 senderId, String16L senderName, String16L emoteText.
+            if r.remaining() < 4 {
+                return Some(Incoming::Other(op));
+            }
+            let sender_id = r.u32();
+            let sender = r.string16l();
+            let text = r.string16l();
+            Some(Incoming::EmoteText { sender_id, sender, text })
         }
         _ => Some(Incoming::Other(op)),
     }
@@ -1954,7 +2255,122 @@ fn decode_event(event_type: u32, r: &mut Reader) -> Event {
                 Event::AttackDone { code: r.u32() }
             }
         }
+        event::MAGIC_UPDATE_SPELL => {
+            if r.remaining() < 4 {
+                Event::Unknown
+            } else {
+                let spell_id = r.u16() as u32;
+                let layer = r.u16() as u32;
+                Event::MagicUpdateSpell { spell_id, layer }
+            }
+        }
+        event::MAGIC_REMOVE_SPELL => {
+            if r.remaining() < 4 {
+                Event::Unknown
+            } else {
+                let spell_id = r.u16() as u32;
+                let layer = r.u16() as u32;
+                Event::MagicRemoveSpell { spell_id, layer }
+            }
+        }
+        event::BOOK_DATA_RESPONSE => parse_book_data_response(r),
+        event::BOOK_PAGE_DATA_RESPONSE => parse_book_page_data_response(r),
+        event::BOOK_MODIFY_PAGE_RESPONSE
+        | event::BOOK_ADD_PAGE_RESPONSE
+        | event::BOOK_DELETE_PAGE_RESPONSE => {
+            if r.remaining() < 12 {
+                Event::Unknown
+            } else {
+                let book_guid = r.u32();
+                let page = r.u32();
+                let success = r.u32() != 0;
+                Event::BookMutationResponse { book_guid, page, success }
+            }
+        }
         _ => Event::Unknown,
+    }
+}
+
+/// `BookDataResponse` (0x00B4): `u32 bookID, u32 maxPages, u32 numPages,
+/// u32 maxChars, u32 pageCount, pageCount x page, String16L inscription,
+/// u32 authorId, String16L authorName`. Each page is `u32 authorId,
+/// String16L authorName, String16L authorAccount, u32 flags(0xFFFF0002),
+/// u32 textIncluded [, u32 ignoreAuthor, String16L text]`.
+fn parse_book_data_response(r: &mut Reader) -> Event {
+    if r.remaining() < 20 {
+        return Event::Unknown;
+    }
+    let book_guid = r.u32();
+    let max_pages = r.u32();
+    let _num_pages = r.u32();
+    let max_chars = r.u32();
+    let page_count = r.u32() as usize;
+    let mut pages = Vec::with_capacity(page_count);
+    for page in 0..page_count {
+        if r.remaining() < 8 {
+            break;
+        }
+        let _author_id = r.u32();
+        let author = r.string16l();
+        let _author_account = r.string16l();
+        r.u32(); // flags (0xFFFF0002)
+        if r.remaining() < 4 {
+            break;
+        }
+        let text_included = r.u32();
+        let mut text = String::new();
+        if text_included != 0 {
+            if r.remaining() < 4 {
+                break;
+            }
+            r.u32(); // ignoreAuthor
+            text = r.string16l();
+        }
+        pages.push(BookPage { page: page as u32, author, text });
+    }
+    let inscription = r.string16l();
+    if r.remaining() < 8 {
+        return Event::Unknown;
+    }
+    let _author_id = r.u32();
+    let author = r.string16l();
+    Event::BookDataResponse {
+        book_guid,
+        max_pages,
+        max_chars,
+        pages,
+        inscription,
+        author,
+    }
+}
+
+/// `BookPageDataResponse` (0x00B8): `u32 bookID, u32 pageIndex, u32
+/// authorId, String16L authorName, String16L authorAccount, u32 flags,
+/// u32 textIncluded, u32 ignoreAuthor, String16L text`.
+fn parse_book_page_data_response(r: &mut Reader) -> Event {
+    if r.remaining() < 12 {
+        return Event::Unknown;
+    }
+    let book_guid = r.u32();
+    let page = r.u32();
+    let _author_id = r.u32();
+    let author = r.string16l();
+    let _author_account = r.string16l();
+    r.u32(); // flags (0xFFFF0002)
+    if r.remaining() < 8 {
+        return Event::Unknown;
+    }
+    let text_included = r.u32();
+    if text_included == 0 {
+        return Event::Unknown;
+    }
+    r.u32(); // ignoreAuthor
+    let text = r.string16l();
+    Event::BookPageDataResponse {
+        book_guid,
+        page,
+        author,
+        text,
     }
 }
 
@@ -2098,22 +2514,27 @@ fn parse_player_description(r: &mut Reader) -> PlayerDescription {
         }
     }
 
-    // Enchantment registry (vector flag 0x0200): mask-gated lists; the Vitae
-    // entry is not retained, so all of it is skipped.
+    // Enchantment registry (vector flag 0x0200): mask-gated lists. The
+    // Vitae entry (mask bit 0x4, spell 666) carries the death-penalty
+    // multiplier in stat_mod_value.
     if vector_flags & 0x0200 != 0 {
         let mask = r.u32();
         for &bit in &[0x1u32, 0x2, 0x8] {
             if mask & bit != 0 {
                 let n = r.u32() as usize;
                 for _ in 0..n {
-                    if !skip_enchantment(r) {
+                    if !enchantment_complete(r) {
                         return finalize_pd(&mut pd);
                     }
+                    pd.enchantments.push(parse_enchantment(r));
                 }
             }
         }
-        if mask & 0x4 != 0 && !skip_enchantment(r) {
-            return finalize_pd(&mut pd);
+        if mask & 0x4 != 0 {
+            if !enchantment_complete(r) {
+                return finalize_pd(&mut pd);
+            }
+            pd.enchantments.push(parse_enchantment(r));
         }
     }
 
@@ -2656,20 +3077,15 @@ fn parse_enchantment(r: &mut Reader) -> Enchantment {
     e
 }
 
-/// Skip one enchantment, returning whether it was fully present.
-fn skip_enchantment(r: &mut Reader) -> bool {
+/// Return whether a complete enchantment (60 bytes, plus 4 when
+/// `hasSpellSetId` is set) is present at the reader's current position.
+/// Peeks only; `parse_enchantment` does the consuming read.
+fn enchantment_complete(r: &Reader) -> bool {
     if r.remaining() < 60 {
         return false;
     }
     let has_spell_set = u16::from_le_bytes([r.buf[r.pos + 6], r.buf[r.pos + 7]]) != 0;
-    r.raw(60);
-    if has_spell_set {
-        if r.remaining() < 4 {
-            return false;
-        }
-        r.raw(4);
-    }
-    true
+    !has_spell_set || r.remaining() >= 64
 }
 
 /// `FriendsListUpdate` (0x0021): `u32 count`, per friend
@@ -3623,10 +4039,21 @@ mod tests {
 
     #[test]
     fn melee_attack_body() {
-        let b = body_targeted_melee_attack(0x0011_0042);
+        let b = body_targeted_melee_attack(0x0011_0042, 3, 0.5);
+        assert_eq!(b.len(), 12);
         let mut r = Reader::new(&b);
         assert_eq!(r.u32(), 0x0011_0042);
-        assert_eq!(r.u32(), 2); // height
+        assert_eq!(r.u32(), 3); // height
+        assert!((r.f32() - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn missile_attack_body() {
+        let b = body_targeted_missile_attack(0x0011_0043, 2, 1.0);
+        assert_eq!(b.len(), 12);
+        let mut r = Reader::new(&b);
+        assert_eq!(r.u32(), 0x0011_0043);
+        assert_eq!(r.u32(), 2);
         assert!((r.f32() - 1.0).abs() < f32::EPSILON);
     }
 
@@ -4539,5 +4966,282 @@ mod tests {
             AppraiseWeapon { damage_min: 25, damage_var: 10, skill: 11 }
         );
         assert_eq!(a.armor_levels.unwrap(), [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn new_action_bodies() {
+        // Casting.
+        let b = body_cast_untargeted_spell(230);
+        assert_eq!(b, vec![230, 0, 0, 0]);
+        let b = body_cast_targeted_spell(0x0011_0042, 230);
+        let mut r = Reader::new(&b);
+        assert_eq!(r.u32(), 0x0011_0042);
+        assert_eq!(r.u32(), 230);
+        // Allegiance.
+        let b = body_swear_allegiance(0x0011_0001);
+        assert_eq!(b, vec![1, 0, 0x11, 0]);
+        let b = body_break_allegiance(0x0011_0001);
+        assert_eq!(b, vec![1, 0, 0x11, 0]);
+        // Friends.
+        let b = body_add_friend("Rurik");
+        let mut r = Reader::new(&b);
+        assert_eq!(r.string16l(), "Rurik");
+        assert_eq!(r.remaining(), 0);
+        let b = body_remove_friend(0x0011_0002);
+        assert_eq!(b, vec![2, 0, 0x11, 0]);
+        // Fellowship.
+        let b = body_fellowship_create("The Guild", true);
+        let mut r = Reader::new(&b);
+        assert_eq!(r.string16l(), "The Guild");
+        assert_eq!(r.u32(), 1);
+        let b = body_fellowship_quit(true);
+        assert_eq!(b, vec![1, 0, 0, 0]);
+        let b = body_fellowship_dismiss(0x0011_0003);
+        assert_eq!(b, vec![3, 0, 0x11, 0]);
+        let b = body_fellowship_recruit(0x0011_0004);
+        assert_eq!(b, vec![4, 0, 0x11, 0]);
+        let b = body_fellowship_new_leader(0x0011_0005);
+        assert_eq!(b, vec![5, 0, 0x11, 0]);
+        let b = body_fellowship_openness(true);
+        assert_eq!(b, vec![1, 0, 0, 0]);
+        // Books.
+        let b = body_book_data(0x0028_0001);
+        assert_eq!(b, vec![1, 0, 0x28, 0]);
+        let b = body_book_modify_page(0x0028_0001, 2, "hello");
+        let mut r = Reader::new(&b);
+        assert_eq!(r.u32(), 0x0028_0001);
+        assert_eq!(r.i32(), 2);
+        assert_eq!(r.string16l(), "hello");
+        let b = body_book_add_page(0x0028_0001);
+        assert_eq!(b, vec![1, 0, 0x28, 0]);
+        let b = body_book_delete_page(0x0028_0001, 1);
+        let mut r = Reader::new(&b);
+        assert_eq!(r.u32(), 0x0028_0001);
+        assert_eq!(r.i32(), 1);
+        let b = body_book_page_data(0x0028_0001, 0);
+        let mut r = Reader::new(&b);
+        assert_eq!(r.u32(), 0x0028_0001);
+        assert_eq!(r.i32(), 0);
+        // Spell favorites.
+        let b = body_add_spell_favorite(230, 3, 1);
+        let mut r = Reader::new(&b);
+        assert_eq!(r.u32(), 230);
+        assert_eq!(r.u32(), 3);
+        assert_eq!(r.u32(), 1);
+        let b = body_remove_spell_favorite(230, 1);
+        let mut r = Reader::new(&b);
+        assert_eq!(r.u32(), 230);
+        assert_eq!(r.u32(), 1);
+        // Emotes / remove spell / ping.
+        let b = body_emote("waves");
+        let mut r = Reader::new(&b);
+        assert_eq!(r.string16l(), "waves");
+        let b = body_soul_emote("stands");
+        let mut r = Reader::new(&b);
+        assert_eq!(r.string16l(), "stands");
+        assert_eq!(body_remove_spell(230), vec![230, 0, 0, 0]);
+        assert!(body_ping_request().is_empty());
+    }
+
+    #[test]
+    fn magic_spell_events() {
+        let mut b = Writer::new();
+        b.u16(230); // spellId
+        b.u16(1); // layer
+        let Event::MagicUpdateSpell { spell_id, layer } = ge_event(event::MAGIC_UPDATE_SPELL, &b.out) else {
+            panic!("expected MagicUpdateSpell");
+        };
+        assert_eq!(spell_id, 230);
+        assert_eq!(layer, 1);
+
+        let Event::MagicRemoveSpell { spell_id, layer } = ge_event(event::MAGIC_REMOVE_SPELL, &b.out) else {
+            panic!("expected MagicRemoveSpell");
+        };
+        assert_eq!(spell_id, 230);
+        assert_eq!(layer, 1);
+    }
+
+    #[test]
+    fn book_data_response_event() {
+        let mut b = Writer::new();
+        b.u32(0x0028_0001); // bookID
+        b.u32(10); // maxPages
+        b.u32(10); // numPages
+        b.u32(4000); // maxChars
+        b.u32(2); // pageCount
+        // page 0
+        b.u32(0x0011_0001); // authorId
+        b.string16l("Rurik");
+        b.string16l("rurik_ac");
+        b.u32(0xFFFF_0002);
+        b.u32(0); // textIncluded
+        // page 1
+        b.u32(0x0011_0002);
+        b.string16l("Mira");
+        b.string16l("mira_ac");
+        b.u32(0xFFFF_0002);
+        b.u32(0);
+        b.string16l("A story book"); // inscription
+        b.u32(0x0011_0001); // authorId
+        b.string16l("Rurik"); // author
+        let Event::BookDataResponse {
+            book_guid,
+            max_pages,
+            max_chars,
+            pages,
+            inscription,
+            author,
+        } = ge_event(event::BOOK_DATA_RESPONSE, &b.out)
+        else {
+            panic!("expected BookDataResponse");
+        };
+        assert_eq!(book_guid, 0x0028_0001);
+        assert_eq!(max_pages, 10);
+        assert_eq!(max_chars, 4000);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].author, "Rurik");
+        assert_eq!(pages[1].author, "Mira");
+        assert_eq!(inscription, "A story book");
+        assert_eq!(author, "Rurik");
+    }
+
+    #[test]
+    fn book_page_data_response_event() {
+        let mut b = Writer::new();
+        b.u32(0x0028_0001);
+        b.u32(3); // pageIndex
+        b.u32(0x0011_0001); // authorId
+        b.string16l("Rurik");
+        b.string16l("rurik_ac");
+        b.u32(0xFFFF_0002);
+        b.u32(1); // textIncluded
+        b.u32(0); // ignoreAuthor
+        b.string16l("Once upon a time");
+        let Event::BookPageDataResponse { book_guid, page, author, text } =
+            ge_event(event::BOOK_PAGE_DATA_RESPONSE, &b.out)
+        else {
+            panic!("expected BookPageDataResponse");
+        };
+        assert_eq!(book_guid, 0x0028_0001);
+        assert_eq!(page, 3);
+        assert_eq!(author, "Rurik");
+        assert_eq!(text, "Once upon a time");
+    }
+
+    #[test]
+    fn book_mutation_events() {
+        let mut b = Writer::new();
+        b.u32(0x0028_0001);
+        b.u32(2);
+        b.u32(1); // success
+        let Event::BookMutationResponse { book_guid, page, success } =
+            ge_event(event::BOOK_MODIFY_PAGE_RESPONSE, &b.out)
+        else {
+            panic!("expected BookMutationResponse");
+        };
+        assert_eq!(book_guid, 0x0028_0001);
+        assert_eq!(page, 2);
+        assert!(success);
+
+        let Event::BookMutationResponse { book_guid, page, success } =
+            ge_event(event::BOOK_ADD_PAGE_RESPONSE, &b.out)
+        else {
+            panic!("expected BookMutationResponse");
+        };
+        assert_eq!(book_guid, 0x0028_0001);
+        assert_eq!(page, 2);
+        assert!(success);
+
+        let Event::BookMutationResponse { book_guid, page, success } =
+            ge_event(event::BOOK_DELETE_PAGE_RESPONSE, &b.out)
+        else {
+            panic!("expected BookMutationResponse");
+        };
+        assert_eq!(book_guid, 0x0028_0001);
+        assert_eq!(page, 2);
+        assert!(success);
+    }
+
+    #[test]
+    fn pd_enchantment_registry_vitae() {
+        let mut b = Writer::new();
+        b.u32(0x0001); // propertyFlags (Int32)
+        b.u32(0x2); // weenieType
+        // Int table: encumbrance, coinValue
+        b.u16(2);
+        b.u16(4);
+        b.u32(5);
+        b.i32(100);
+        b.u32(20);
+        b.i32(500);
+        // vectorFlags (Attr|Skill|Spell|Enchant) + hasHealth
+        b.u32(0x0303);
+        b.u32(1);
+        // Attribute block: all 6 attrs + 3 vitals
+        b.u32(0x1FF);
+        b.u32(5);
+        b.u32(30);
+        b.u32(0);
+        for _ in 0..5 {
+            b.u32(0);
+            b.u32(10);
+            b.u32(0);
+        }
+        for i in 0..3u32 {
+            b.u32(0);
+            b.u32(100 + i);
+            b.u32(0);
+            b.u32(100 + i);
+        }
+        // Skill table: 1 entry
+        b.u16(1);
+        b.u16(4);
+        b.u32(1);
+        b.u16(10);
+        b.u16(1);
+        b.u32(1);
+        b.u32(0);
+        b.u32(1);
+        b.u32(0);
+        b.f64(0.0);
+        // Spell table: 1 entry
+        b.u16(1);
+        b.u16(2);
+        b.u32(10);
+        b.f32(2.0);
+        // Enchantment registry: mask 0x4 (Vitae only)
+        b.u32(0x4);
+        // One 60-byte enchantment (Vitae, spell 666)
+        b.u16(666); // spellId
+        b.u16(0); // layer
+        b.u16(0); // spellCategory
+        b.u16(0); // hasSpellSetId
+        b.u32(0); // powerLevel
+        b.f64(0.0); // startTime
+        b.f64(0.0); // duration
+        b.u32(0); // casterGuid
+        b.f32(0.0); // degradeModifier
+        b.f32(1.0); // degradeLimit
+        b.f64(0.0); // lastTimeDegraded
+        b.u32(0); // statModType
+        b.u32(36); // statModKey
+        b.f32(0.5); // statModValue (death penalty multiplier)
+        // optionFlags (SpellLists8) + characterOptions1
+        b.u32(0x0400);
+        b.u32(0);
+        // SpellLists8: 8 tabs (all empty)
+        for _ in 0..8 {
+            b.u32(0);
+        }
+        b.u32(0x40); // spellFilters
+        // inventory: 0, equipped: 0
+        b.u32(0);
+        b.u32(0);
+        let Event::PlayerDescription(pd) = ge_event(event::PLAYER_DESCRIPTION, &b.out) else {
+            panic!("expected PlayerDescription");
+        };
+        assert_eq!(pd.enchantments.len(), 1);
+        assert_eq!(pd.enchantments[0].spell_id, 666);
+        assert!((pd.enchantments[0].stat_mod_value - 0.5).abs() < f32::EPSILON);
     }
 }

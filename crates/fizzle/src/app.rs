@@ -8,11 +8,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKe
 
 use acproto::codec::Vec3;
 use acproto::messages::{self, combat_mode, Event, GameEvent, Incoming};
+use acproto::motion::{self, soul_emote_body};
 use crate::movement::{HeldKeys, Movement, TICK};
 use crate::net::{Net, NetEvent};
 use acgeo::{World3D, WorldProbe};
 use crate::themes::Theme;
-use crate::world::{ChatStyle, ItemState, World};
+use crate::world::{BookPage, BookState, ChatStyle, Combat, ItemState, World};
 /// Auto-reconnect backoff (Stockpile parity): start 10 s, double per failed
 /// attempt, cap 5 min. A successful login resets the sequence.
 const RECONNECT_MIN_MS: u64 = 10_000;
@@ -155,6 +156,28 @@ fn slot_label(i: usize) -> char {
     SLOTS[i % 10]
 }
 
+/// Display name for a combat-mode bitmask.
+#[must_use]
+pub fn combat_mode_name(mode: u32) -> &'static str {
+    match mode {
+        combat_mode::NON_COMBAT => "peace mode",
+        combat_mode::MELEE => "melee combat",
+        combat_mode::MISSILE => "missile combat",
+        combat_mode::MAGIC => "magic combat",
+        _ => "unknown mode",
+    }
+}
+
+/// Soul emote raw commands (low 16 bits of `MotionCommand`; all in the
+/// server's `SoulEmotes` set).
+mod emote_cmd {
+    pub const POINT: u16 = 0x00F0;
+    pub const LAUGH: u16 = 0x0080;
+    pub const WAVE: u16 = 0x0087;
+    pub const CHEER: u16 = 0x004C;
+    pub const CRY: u16 = 0x007F;
+}
+
 /// Rotate a model-space AABB's 8 corners by the quaternion, translate by the
 /// world origin, and re-bound: the world-space collision slab `World3D`
 /// expects (its `setup_aabb` returns the model-space box).
@@ -208,7 +231,6 @@ pub struct App {
     pub chat_buf: String,
     pub chat_focused: bool,
     pub run_lock: bool,
-    pub combat_mode: u32,
     pub targets: Vec<u32>,
     // Kind of the current target list (0 creature, 1 object, 2 player).
     pub target_kind: u8,
@@ -250,6 +272,16 @@ pub struct App {
     pub enter_started_at: Option<Instant>,
     /// When the logout (0xF653) was sent (25 s local fallback).
     pub logoff_sent_at: Option<Instant>,
+    /// When the game-level `PingRequest` (0x01E9) was last sent; the RTT is
+    /// measured against the matching `PingResponse`.
+    pub last_game_ping: Option<Instant>,
+    /// When the `QueryHealth` heartbeat was last sent to the current target
+    /// (1 Hz while a target is selected).
+    pub last_target_health: Option<Instant>,
+    /// Last user input (any key/mouse); drives the 1200 s idle logout.
+    pub last_input: Instant,
+    /// Motion sequence counter for client-initiated soul emotes.
+    pub emote_seq: u16,
     pub quit: bool,
     /// The Esc menu (Some) and its subview; None = the world UI.
     pub menu_view: Option<MenuView>,
@@ -332,7 +364,6 @@ impl App {
             chat_buf: String::new(),
             chat_focused: false,
             run_lock: true,
-            combat_mode: combat_mode::NON_COMBAT,
             targets: Vec::new(),
             target_kind: 0,
             talk_to: None,
@@ -353,6 +384,10 @@ impl App {
             last_link_check: None,
             enter_started_at: None,
             logoff_sent_at: None,
+            last_game_ping: None,
+            last_target_health: None,
+            last_input: Instant::now(),
+            emote_seq: 0,
             quit: false,
             menu_view: None,
             menu_sel: 0,
@@ -445,7 +480,6 @@ impl App {
         self.movement = None;
         self.world = World::new();
         self.targets.clear();
-        self.combat_mode = combat_mode::NON_COMBAT;
         self.keys_down.clear();
         self.chat_buf.clear();
         self.chat_focused = false;
@@ -819,14 +853,28 @@ impl App {
                 if tc.is_ack {
                     return;
                 }
+                if self.world.squelched(&tc.sender) {
+                    return;
+                }
                 let ch = channel_name(tc.channel);
                 self.world.chat.push(&format!("[{ch}] {}", tc.sender), &tc.message, ChatStyle::Channel);
             }
             Incoming::HearSpeech { text, sender, .. } => {
                 if !sender.is_empty() && sender == self.self_name {
                     self.world.chat.push("You", &text, ChatStyle::Own);
+                } else if self.world.squelched(&sender) {
+                    // Squelched: drop silently.
                 } else {
                     self.world.chat.push(&sender, &text, ChatStyle::Speech);
+                }
+            }
+            Incoming::EmoteText { text, sender, .. } => {
+                if !sender.is_empty() && sender == self.self_name {
+                    self.world.chat.push("You", &text, ChatStyle::Emote);
+                } else if self.world.squelched(&sender) {
+                    // Squelched: drop silently.
+                } else {
+                    self.world.chat.push(&sender, &text, ChatStyle::Emote);
                 }
             }
             Incoming::ServerMessage { text, .. } => {
@@ -876,7 +924,6 @@ impl App {
                 self.world = World::new();
                 self.movement = None;
                 self.targets.clear();
-                self.combat_mode = combat_mode::NON_COMBAT;
                 self.keys_down.clear();
                 self.chat_buf.clear();
                 self.chat_focused = false;
@@ -890,6 +937,8 @@ impl App {
             Incoming::HearRangedSpeech { text, sender, .. } => {
                 if !sender.is_empty() && sender == self.self_name {
                     self.world.chat.push("You", &text, ChatStyle::Own);
+                } else if self.world.squelched(&sender) {
+                    // Squelched: drop silently.
                 } else {
                     self.world
                         .chat
@@ -915,9 +964,20 @@ impl App {
                 if let Some((_, name)) = pd.strings.iter().find(|(id, _)| *id == messages::property_string::NAME) {
                     self.self_name = name.clone();
                 }
+                // Fresh world entry: reset combat mode + target heartbeat.
+                self.world.combat = Combat::new();
+                self.world.target_guid = None;
+                self.world.target_health = None;
+                self.world.target_health_max = None;
+                self.last_target_health = None;
+                // Ask the server which house (if any) we own.
+                self.send_action(messages::action::HOUSE_QUERY, &messages::body_house_query());
             }
             Event::Appraise(a) => {
                 self.world.apply_appraise(&a);
+                if Some(a.guid) == self.world.target_guid {
+                    self.world.target_health_max = Some(a.health_max);
+                }
             }
             Event::UpdateHealth { guid, health } => {
                 self.world.update_health_event(guid, health);
@@ -945,9 +1005,17 @@ impl App {
             }
             Event::SetTurbineChatChannels(_) => {}
             Event::Tell { text, name, .. } => {
+                self.world.last_teller = Some(name.clone());
+                if self.world.squelched(&name) {
+                    return;
+                }
                 self.world.chat.push(&format!("Tell {name}"), &text, ChatStyle::Tell);
             }
-            Event::PingResponse => {}
+            Event::PingResponse => {
+                self.world.ping_rtt_ms = self
+                    .last_game_ping
+                    .map(|t| t.elapsed().as_secs_f64() * 1000.0);
+            }
             Event::Unknown => {}
             Event::PopupString { text } => {
                 self.world.chat.push("System", &text, ChatStyle::System);
@@ -1107,7 +1175,11 @@ impl App {
                     .map(|m| m.name.clone())
                     .unwrap_or_default();
                 let members = f.fellows.iter().map(|m| m.name.clone()).collect();
-                self.world.social.fellowship = Some(crate::world::Fellowship { leader, members });
+                self.world.social.fellowship = Some(crate::world::Fellowship {
+                    leader,
+                    members,
+                    open: f.open,
+                });
             }
             Event::HouseData(h) => {
                 self.world.social.house = Some(crate::world::House {
@@ -1144,6 +1216,62 @@ impl App {
             Event::AttackDone { code } => {
                 if code != 0 {
                     self.world.flash.replace(format!("Attack failed ({code})"));
+                }
+            }
+            Event::MagicUpdateSpell { spell_id, .. } => {
+                if !self.world.skills.spells.contains(&spell_id) {
+                    self.world.skills.spells.push(spell_id);
+                }
+                self.world.chat.push("Spell", &format!("You know spell {spell_id:#06x}"), ChatStyle::System);
+            }
+            Event::MagicRemoveSpell { spell_id, .. } => {
+                self.world.skills.spells.retain(|&s| s != spell_id);
+                for tab in self.world.skills.spell_bar.iter_mut() {
+                    for slot in tab.iter_mut() {
+                        if *slot == spell_id {
+                            *slot = 0;
+                        }
+                    }
+                }
+                self.world.chat.push("Spell", &format!("You forgot spell {spell_id:#06x}"), ChatStyle::System);
+            }
+            Event::BookDataResponse { book_guid, max_pages, max_chars, pages, inscription, author } => {
+                let name = self.world.entity_name(book_guid);
+                self.world.book = Some(BookState {
+                    guid: book_guid,
+                    name,
+                    max_pages,
+                    max_chars,
+                    pages: pages
+                        .into_iter()
+                        .map(|p| BookPage { index: p.page, author: p.author, text: p.text })
+                        .collect(),
+                    inscription,
+                    author,
+                    current: 0,
+                    editing: false,
+                    buffer: String::new(),
+                    open: true,
+                });
+                self.world.flash = Some("book opened".into());
+            }
+            Event::BookPageDataResponse { book_guid, page, author, text } => {
+                if let Some(b) = self.world.book.as_mut() {
+                    if b.guid == book_guid {
+                        if let Some(p) = b.pages.get_mut(page as usize) {
+                            p.author = author;
+                            p.text = text;
+                        }
+                    }
+                }
+            }
+            Event::BookMutationResponse { book_guid, page, success } => {
+                if self.world.book.as_ref().map(|b| b.guid) == Some(book_guid) {
+                    self.world.flash = Some(if success {
+                        format!("book page {page} saved")
+                    } else {
+                        format!("book page {page} failed")
+                    });
                 }
             }
         }
@@ -1204,15 +1332,20 @@ impl App {
 
     // =============================================================== combat
 
+    /// Backtick: toggle between NonCombat and the default combat mode
+    /// (derived from the equipped weapon). Sends `ChangeCombatMode`.
     pub fn toggle_combat_mode(&mut self) {
-        if self.combat_mode == combat_mode::MELEE {
-            self.combat_mode = combat_mode::NON_COMBAT;
-            self.world.flash = Some("peace mode".into());
-        } else {
-            self.combat_mode = combat_mode::MELEE;
-            self.world.flash = Some("combat mode".into());
+        if self.phase != Phase::InWorld || self.world.dead {
+            return;
         }
-        self.send_action(messages::action::CHANGE_COMBAT_MODE, &messages::body_change_combat_mode(self.combat_mode));
+        let mode = if self.world.combat.mode == combat_mode::NON_COMBAT {
+            self.world.default_combat_mode()
+        } else {
+            combat_mode::NON_COMBAT
+        };
+        self.world.combat.mode = mode;
+        self.world.flash = Some(combat_mode_name(mode).into());
+        self.send_action(messages::action::CHANGE_COMBAT_MODE, &messages::body_change_combat_mode(mode));
     }
 
     /// Rebuild the target list for the current kind (0 creature, 1 object,
@@ -1260,9 +1393,16 @@ impl App {
     /// Send IdentifyObject + QueryHealth for the current target.
     pub fn appraise_current(&mut self) {
         let Some(guid) = self.current_target() else {
+            self.world.target_guid = None;
+            self.world.target_health = None;
+            self.world.target_health_max = None;
             self.world.flash = Some("no target selected".into());
             return;
         };
+        self.world.target_guid = Some(guid);
+        // Seed max health from a prior appraise, if known; the Appraise
+        // response below (and the heartbeat) keep it fresh.
+        self.world.target_health_max = self.world.entities.get(&guid).and_then(|e| e.health_max);
         self.world.flash = Some(format!("target: {}", entity_name(&self.world, guid)));
         self.send_action(messages::action::IDENTIFY_OBJECT, &messages::body_identify_object(guid));
         self.send_action(messages::action::QUERY_HEALTH, &messages::body_query_health(guid));
@@ -1313,6 +1453,15 @@ impl App {
             return;
         }
         let Some(guid) = self.current_target() else {
+            // No target: if someone told us recently, prefill a reply.
+            if self.talk_to.is_none() {
+                if let Some(teller) = self.world.last_teller.clone() {
+                    self.chat_focused = true;
+                    self.chat_buf = format!("/t {teller} ");
+                    self.world.flash = Some(format!("replying to {teller}"));
+                    return;
+                }
+            }
             self.world.flash = Some("nothing targeted (+ - ' [ ] \\ , / to target)".into());
             return;
         };
@@ -1524,22 +1673,535 @@ impl App {
         self.world.flash = Some("loot closed".into());
     }
 
+    /// T — attack the current target (melee or missile, per combat mode),
+    /// at the current height and power/accuracy.
     pub fn attack(&mut self) {
         if self.phase != Phase::InWorld || self.world.dead {
             return;
         }
-        if self.combat_mode != combat_mode::MELEE {
-            self.world.flash = Some("peace mode — ` toggles combat".into());
+        let mode = self.world.combat.mode;
+        if mode != combat_mode::MELEE && mode != combat_mode::MISSILE {
+            self.world.flash = Some(format!("{} — ` toggles combat", combat_mode_name(mode)));
             return;
         }
         let Some(target) = self.current_target() else {
             self.world.flash = Some("no target selected".into());
             return;
         };
+        let (height, power) = (self.world.combat.height, self.world.combat.power);
+        if mode == combat_mode::MISSILE {
+            self.send_action(
+                messages::action::TARGETED_MISSILE_ATTACK,
+                &messages::body_targeted_missile_attack(target, height, power),
+            );
+        } else {
+            self.send_action(
+                messages::action::TARGETED_MELEE_ATTACK,
+                &messages::body_targeted_melee_attack(target, height, power),
+            );
+        }
+    }
+
+    /// Melee/Missile: lower the attack power (quantized to 1/6 steps).
+    pub fn attack_power_down(&mut self) {
+        let idx = (self.world.combat.power * 6.0).round() as i32 - 1;
+        self.world.combat.power = (idx.clamp(0, 6)) as f32 / 6.0;
+        self.flash_combat_stats();
+    }
+
+    /// Melee/Missile: raise the attack power (quantized to 1/6 steps).
+    pub fn attack_power_up(&mut self) {
+        let idx = (self.world.combat.power * 6.0).round() as i32 + 1;
+        self.world.combat.power = (idx.clamp(0, 6)) as f32 / 6.0;
+        self.flash_combat_stats();
+    }
+
+    /// Melee/Missile: set the attack height (1 Low / 2 Medium / 3 High).
+    pub fn set_attack_height(&mut self, height: u32) {
+        self.world.combat.height = height.clamp(1, 3);
+        self.flash_combat_stats();
+    }
+
+    fn flash_combat_stats(&mut self) {
+        let c = &self.world.combat;
+        self.world.flash = Some(format!(
+            "power {}%  height {}",
+            (c.power * 100.0).round() as u32,
+            match c.height {
+                1 => "low",
+                3 => "high",
+                _ => "medium",
+            }
+        ));
+    }
+
+    // --------------------------------------------------------- magic / emote
+
+    /// Magic: the spell selected on the open tab (End key / slot hotkey).
+    /// Targets the current target when one is selected, else casts on self.
+    pub fn cast_spell(&mut self) {
+        if self.phase != Phase::InWorld || self.world.dead {
+            return;
+        }
+        if self.world.combat.mode != combat_mode::MAGIC {
+            self.world.flash = Some("switch to magic mode (`)".into());
+            return;
+        }
+        let tab = self.world.skills.tab;
+        let slot = self.world.skills.slot;
+        let Some(spell_id) = self
+            .world
+            .skills
+            .spell_bar
+            .get(tab)
+            .and_then(|t| t.get(slot))
+            .copied()
+        else {
+            self.world.flash = Some("You must select a spell to cast".into());
+            return;
+        };
+        if spell_id == 0 {
+            self.world.flash = Some("You must select a spell to cast".into());
+            return;
+        }
+        match self.current_target() {
+            Some(target) => self.send_action(
+                messages::action::CAST_TARGETED_SPELL,
+                &messages::body_cast_targeted_spell(target, spell_id),
+            ),
+            None => self.send_action(
+                messages::action::CAST_UNTARGETED_SPELL,
+                &messages::body_cast_untargeted_spell(spell_id),
+            ),
+        }
+    }
+
+    /// Magic: select slot `n` of the open tab and cast it (1-9 hotkeys).
+    pub fn use_spell_slot(&mut self, n: usize) {
+        self.world.skills.slot = n % 10;
+        self.cast_spell();
+    }
+
+    /// Magic: move to the previous/next spell slot on the open tab.
+    pub fn cycle_spell_slot(&mut self, dir: i32) {
+        let n = 10i32;
+        self.world.skills.slot =
+            (((self.world.skills.slot as i32) + dir).rem_euclid(n)) as usize;
+        let id = self
+            .world
+            .skills
+            .spell_bar
+            .get(self.world.skills.tab)
+            .and_then(|t| t.get(self.world.skills.slot))
+            .copied()
+            .unwrap_or(0);
+        let label = if id == 0 { "empty".to_string() } else { format!("#{id}") };
+        self.world.flash = Some(format!("spell slot {} — {label}", slot_label(self.world.skills.slot)));
+    }
+
+    /// Magic: move to the previous/next spell tab.
+    pub fn cycle_spell_tab(&mut self, dir: i32) {
+        self.world.skills.tab = (((self.world.skills.tab as i32) + dir).rem_euclid(8)) as usize;
+        self.world.flash = Some(format!("spell tab {}", self.world.skills.tab + 1));
+    }
+
+    /// Soul emote (K/I/J/O/U): a one-item MoveToState command list.
+    pub fn emote(&mut self, raw_command: u16, label: &str) {
+        if self.phase != Phase::InWorld || self.world.dead {
+            return;
+        }
+        let Some(mv) = self.movement.as_ref() else {
+            return;
+        };
+        self.emote_seq = (self.emote_seq + 1) & 0x7FFF;
+        let body = soul_emote_body(&mv.current_position(), mv.grounded, raw_command, self.emote_seq);
+        self.send_action(messages::action::MOVE_TO_STATE, &body);
+        self.world.flash = Some(format!("*you {label}*"));
+    }
+
+    /// Stance (Y/G/H/B): a MoveToState carrying the stance as the forward
+    /// command (a substate the server accepts).
+    pub fn set_stance(&mut self, command: u32, label: &str) {
+        if self.phase != Phase::InWorld || self.world.dead {
+            return;
+        }
+        let Some(mv) = self.movement.as_ref() else {
+            return;
+        };
+        let h = motion::hold_key::NONE;
+        let mts = motion::MoveToState {
+            packed_flags: motion::PACKED_FLAGS_ALL,
+            current_hold_key: h,
+            current_style: motion::MOTION_STYLE,
+            forward_command: command,
+            forward_hold_key: h,
+            forward_speed: 0.0,
+            sidestep_command: motion::command::READY,
+            sidestep_hold_key: h,
+            sidestep_speed: 0.0,
+            turn_command: motion::command::READY,
+            turn_hold_key: h,
+            turn_speed: 0.0,
+            position: mv.current_position(),
+            flags: mv.grounded as u8,
+        };
+        self.world.combat.stance = command;
+        self.send_action(messages::action::MOVE_TO_STATE, &mts.body());
+        self.world.flash = Some(label.into());
+    }
+
+    // ================================================================= social
+
+    /// Open a multi-widget panel by index. Sends the panel-open query so the
+    /// server refreshes the roster (fellowship / allegiance).
+    pub fn open_widget(&mut self, i: usize) {
+        self.multi_sel = i;
+        self.list_scroll = 0;
+        match i {
+            0 => self.send_action(
+                messages::action::ALLEGIANCE_UPDATE_REQUEST,
+                &messages::body_allegiance_update_request(true),
+            ),
+            1 => self.send_action(
+                messages::action::FELLOWSHIP_UPDATE_REQUEST,
+                &messages::body_fellowship_update_request(true),
+            ),
+            _ => {}
+        }
+    }
+
+    /// The current target's guid, if it is a player (for social actions).
+    fn player_target(&self) -> Option<u32> {
+        let g = self.current_target()?;
+        match self.world.entities.get(&g) {
+            Some(e) if e.is_player => Some(g),
+            _ => None,
+        }
+    }
+
+    /// Create a fellowship named `name` (chat: /fellowship <name>).
+    pub fn fellowship_create(&mut self, name: &str) {
+        if self.phase != Phase::InWorld || self.world.dead {
+            return;
+        }
         self.send_action(
-            messages::action::TARGETED_MELEE_ATTACK,
-            &messages::body_targeted_melee_attack(target),
+            messages::action::FELLOWSHIP_CREATE,
+            &messages::body_fellowship_create(name, true),
         );
+        self.world.flash = Some(format!("creating fellowship {name}"));
+    }
+
+    /// Quit the current fellowship (chat: /fellowship quit).
+    pub fn fellowship_quit(&mut self) {
+        if self.phase != Phase::InWorld || self.world.dead {
+            return;
+        }
+        self.send_action(messages::action::FELLOWSHIP_QUIT, &messages::body_fellowship_quit(false));
+        self.world.flash = Some("leaving fellowship".into());
+    }
+
+    /// Recruit the current (player) target into the fellowship (v).
+    pub fn fellowship_recruit(&mut self) {
+        if self.phase != Phase::InWorld || self.world.dead {
+            return;
+        }
+        let Some(g) = self.player_target() else {
+            self.world.flash = Some("target a player to recruit".into());
+            return;
+        };
+        self.send_action(messages::action::FELLOWSHIP_RECRUIT, &messages::body_fellowship_recruit(g));
+        self.world.flash = Some(format!("recruiting {}", entity_name(&self.world, g)));
+    }
+
+    /// Dismiss the current (player) target from the fellowship (m).
+    pub fn fellowship_dismiss(&mut self) {
+        if self.phase != Phase::InWorld || self.world.dead {
+            return;
+        }
+        let Some(g) = self.player_target() else {
+            self.world.flash = Some("target a member to dismiss".into());
+            return;
+        };
+        self.send_action(messages::action::FELLOWSHIP_DISMISS, &messages::body_fellowship_dismiss(g));
+        self.world.flash = Some(format!("dismissing {}", entity_name(&self.world, g)));
+    }
+
+    /// Make the current (player) target the fellowship leader (n).
+    pub fn fellowship_new_leader(&mut self) {
+        if self.phase != Phase::InWorld || self.world.dead {
+            return;
+        }
+        let Some(g) = self.player_target() else {
+            self.world.flash = Some("target a member to make leader".into());
+            return;
+        };
+        self.send_action(
+            messages::action::FELLOWSHIP_ASSIGN_NEW_LEADER,
+            &messages::body_fellowship_new_leader(g),
+        );
+        self.world.flash = Some(format!("making {} the leader", entity_name(&self.world, g)));
+    }
+
+    /// Toggle the fellowship openness (p).
+    pub fn fellowship_toggle_openness(&mut self) {
+        if self.phase != Phase::InWorld || self.world.dead {
+            return;
+        }
+        let open = self.world.social.fellowship.as_ref().map(|f| f.open).unwrap_or(false);
+        self.send_action(
+            messages::action::FELLOWSHIP_CHANGE_OPENNESS,
+            &messages::body_fellowship_openness(!open),
+        );
+        self.world.flash = Some(if open { "fellowship closed" } else { "fellowship open" }.into());
+    }
+
+    /// Swear allegiance to the current (player) target (v).
+    pub fn allegiance_swear(&mut self) {
+        if self.phase != Phase::InWorld || self.world.dead {
+            return;
+        }
+        let Some(g) = self.player_target() else {
+            self.world.flash = Some("target a player to swear to".into());
+            return;
+        };
+        self.send_action(messages::action::SWEAR_ALLEGIANCE, &messages::body_swear_allegiance(g));
+        self.world.flash = Some(format!("swearing allegiance to {}", entity_name(&self.world, g)));
+    }
+
+    /// Break allegiance with the current (player) target (m).
+    pub fn allegiance_break(&mut self) {
+        if self.phase != Phase::InWorld || self.world.dead {
+            return;
+        }
+        let Some(g) = self.player_target() else {
+            self.world.flash = Some("target a member to break with".into());
+            return;
+        };
+        self.send_action(messages::action::BREAK_ALLEGIANCE, &messages::body_break_allegiance(g));
+        self.world.flash = Some(format!("breaking allegiance with {}", entity_name(&self.world, g)));
+    }
+
+    /// Add a friend by name (chat: /friend <name>).
+    pub fn friend_add(&mut self, name: &str) {
+        if self.phase != Phase::InWorld || self.world.dead {
+            return;
+        }
+        self.send_action(messages::action::ADD_FRIEND, &messages::body_add_friend(name));
+        self.world.flash = Some(format!("adding friend {name}"));
+    }
+
+    /// Remove the current (player) target from friends (m).
+    pub fn friend_remove(&mut self) {
+        if self.phase != Phase::InWorld || self.world.dead {
+            return;
+        }
+        let Some(g) = self.player_target() else {
+            self.world.flash = Some("target a friend to remove".into());
+            return;
+        };
+        self.send_action(messages::action::REMOVE_FRIEND, &messages::body_remove_friend(g));
+        self.world.flash = Some(format!("removing friend {}", entity_name(&self.world, g)));
+    }
+
+    /// The spell id on the selected slot of the open tab (0 = empty).
+    fn selected_spell(&self) -> u32 {
+        self.world
+            .skills
+            .spell_bar
+            .get(self.world.skills.tab)
+            .and_then(|t| t.get(self.world.skills.slot))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Add the selected spell to the open tab (spellbook: p).
+    pub fn spell_favorite_add(&mut self) {
+        if self.phase != Phase::InWorld || self.world.dead {
+            return;
+        }
+        let id = self.selected_spell();
+        if id == 0 {
+            self.world.flash = Some("no spell selected".into());
+            return;
+        }
+        self.send_action(
+            messages::action::ADD_SPELL_FAVORITE,
+            &messages::body_add_spell_favorite(
+                id,
+                self.world.skills.slot as u32,
+                self.world.skills.tab as u32,
+            ),
+        );
+        self.world.flash = Some(format!("favorited spell #{id}"));
+    }
+
+    /// Remove the selected spell from the open tab (spellbook: m).
+    pub fn spell_favorite_remove(&mut self) {
+        if self.phase != Phase::InWorld || self.world.dead {
+            return;
+        }
+        let id = self.selected_spell();
+        if id == 0 {
+            self.world.flash = Some("no spell selected".into());
+            return;
+        }
+        self.send_action(
+            messages::action::REMOVE_SPELL_FAVORITE,
+            &messages::body_remove_spell_favorite(id, self.world.skills.tab as u32),
+        );
+        self.world.flash = Some(format!("unfavorited spell #{id}"));
+    }
+
+    /// Forget the selected spell entirely (spellbook: v).
+    pub fn spell_forget(&mut self) {
+        if self.phase != Phase::InWorld || self.world.dead {
+            return;
+        }
+        let id = self.selected_spell();
+        if id == 0 {
+            self.world.flash = Some("no spell selected".into());
+            return;
+        }
+        self.send_action(messages::action::REMOVE_SPELL, &messages::body_remove_spell(id));
+        self.world.flash = Some(format!("forgetting spell #{id}"));
+    }
+
+    /// Open the idx-th side pack (a container in the main pack) with USE; the
+    /// server answers with ViewContents, which the loot view displays.
+    pub fn open_side_pack(&mut self, idx: usize) {
+        if self.phase != Phase::InWorld || self.world.dead {
+            return;
+        }
+        let Some(guid) = self.world.inventory.packs.get(idx).copied() else {
+            return;
+        };
+        self.send_action(messages::action::USE, &messages::body_use(guid));
+        self.world.flash = Some("opening pack".into());
+    }
+
+    // =================================================================== book
+
+    /// Close the open book.
+    pub fn book_close(&mut self) {
+        if let Some(mut b) = self.world.book.take() {
+            b.open = false;
+            b.editing = false;
+            b.buffer.clear();
+        }
+        self.world.flash = Some("book closed".into());
+    }
+
+    /// Previous / next page in the open book.
+    pub fn book_page_step(&mut self, dir: i32) {
+        let Some(b) = self.world.book.as_mut() else {
+            return;
+        };
+        let n = b.pages.len() as i32;
+        if n == 0 {
+            return;
+        }
+        b.current = (((b.current as i32) + dir).rem_euclid(n.max(1))) as usize;
+        b.buffer = b.pages.get(b.current).map(|p| p.text.clone()).unwrap_or_default();
+    }
+
+    /// Toggle edit mode; entering it loads the current page text into the buffer.
+    pub fn book_edit_toggle(&mut self) {
+        let Some(b) = self.world.book.as_mut() else {
+            return;
+        };
+        b.editing = !b.editing;
+        if b.editing {
+            b.buffer = b.pages.get(b.current).map(|p| p.text.clone()).unwrap_or_default();
+            self.world.flash = Some(format!("editing page {}", b.current + 1));
+        }
+    }
+
+    /// Save the edited page (BOOK_MODIFY_PAGE).
+    pub fn book_save_page(&mut self) {
+        let Some((guid, page, text)) = self.world.book.as_ref().map(|b| (b.guid, b.current, b.buffer.clone()))
+        else {
+            return;
+        };
+        self.world.book.as_mut().unwrap().editing = false;
+        self.send_action(
+            messages::action::BOOK_MODIFY_PAGE,
+            &messages::body_book_modify_page(guid, page as i32, &text),
+        );
+        self.world.flash = Some(format!("saving page {page}"));
+    }
+
+    /// Add a blank page (BOOK_ADD_PAGE).
+    pub fn book_add_page(&mut self) {
+        let Some(guid) = self.world.book.as_ref().map(|b| b.guid) else {
+            return;
+        };
+        self.send_action(messages::action::BOOK_ADD_PAGE, &messages::body_book_add_page(guid));
+        self.world.flash = Some("adding page".into());
+    }
+
+    /// Delete the current page (BOOK_DELETE_PAGE).
+    pub fn book_delete_page(&mut self) {
+        let Some((guid, page)) = self.world.book.as_ref().map(|b| (b.guid, b.current)) else {
+            return;
+        };
+        self.send_action(
+            messages::action::BOOK_DELETE_PAGE,
+            &messages::body_book_delete_page(guid, page as i32),
+        );
+        self.world.flash = Some(format!("deleting page {page}"));
+    }
+
+    /// Fetch the current page's text (BOOK_PAGE_DATA).
+    pub fn book_fetch_page(&mut self) {
+        let Some((guid, page)) = self.world.book.as_ref().map(|b| (b.guid, b.current)) else {
+            return;
+        };
+        self.send_action(
+            messages::action::BOOK_PAGE_DATA,
+            &messages::body_book_page_data(guid, page as i32),
+        );
+    }
+
+    /// Keys for the open book (modal). Editing mode captures text into the
+    /// buffer (Enter saves, Esc cancels); display mode navigates and edits.
+    fn book_key(&mut self, ev: &KeyEvent, press: bool) {
+        let (open, editing) = match self.world.book.as_ref() {
+            Some(b) => (b.open, b.editing),
+            None => return,
+        };
+        if !open {
+            return;
+        }
+        if editing {
+            if !press {
+                return;
+            }
+            match ev.code {
+                KeyCode::Enter => self.book_save_page(),
+                KeyCode::Esc => self.world.book.as_mut().unwrap().editing = false,
+                KeyCode::Backspace => {
+                    self.world.book.as_mut().unwrap().buffer.pop();
+                }
+                KeyCode::Char(c) if c.is_ascii_graphic() || c == ' ' => {
+                    self.world.book.as_mut().unwrap().buffer.push(c);
+                }
+                _ => {}
+            }
+            return;
+        }
+        if !press {
+            return;
+        }
+        match ev.code {
+            KeyCode::Up | KeyCode::Char('k') => self.book_page_step(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.book_page_step(1),
+            KeyCode::Char('e') | KeyCode::Char('E') => self.book_edit_toggle(),
+            KeyCode::Char('a') | KeyCode::Char('A') => self.book_add_page(),
+            KeyCode::Char('d') | KeyCode::Char('D') => self.book_delete_page(),
+            KeyCode::Char('r') | KeyCode::Char('R') => self.book_fetch_page(),
+            KeyCode::Esc => self.book_close(),
+            _ => {}
+        }
     }
 
     // ================================================================== chat
@@ -1561,7 +2223,30 @@ impl App {
                 .push(&format!("Tell {}", entity_name(&self.world, guid)), &text, ChatStyle::Tell);
             return;
         }
-        if let Some(rest) = text.strip_prefix('/') {
+        // `:` / `;` prefix → emote / soul emote (the retail emote-chat
+        // prefixes). Sent as dedicated EMOTE / SOUL_EMOTE actions, not as
+        // `@` commands (the server has no `@emote`).
+        if let Some(rest) = text.strip_prefix(':') {
+            let msg = rest.trim().to_string();
+            self.send_action(messages::action::EMOTE, &messages::body_emote(&msg));
+            // No local echo: the server broadcasts the EmoteText back to us
+            // (see Incoming::EmoteText), which is what displays it — matching
+            // retail, where your own emote appears once via the broadcast.
+            return;
+        }
+        if let Some(rest) = text.strip_prefix(';') {
+            let msg = rest.trim().to_string();
+            self.send_action(
+                messages::action::SOUL_EMOTE,
+                &messages::body_soul_emote(&msg),
+            );
+            // No local echo: broadcast back via EmoteText (see above).
+            return;
+        }
+        // `/` or `@` prefix → a command.
+        if text.starts_with('/') || text.starts_with('@') {
+            // `starts_with` on a 1-byte ASCII prefix makes `[1..]` safe.
+            let rest = text[1..].to_string();
             let mut parts = rest.splitn(2, ' ');
             let cmd = parts.next().unwrap_or("");
             let arg = parts.next().unwrap_or("");
@@ -1599,16 +2284,39 @@ impl App {
                             .push("Error", &format!("Unknown channel '{chan}'"), ChatStyle::Error);
                     }
                 }
+                "fellowship" => {
+                    let a = arg.trim();
+                    if a.is_empty() || a == "quit" {
+                        self.fellowship_quit();
+                    } else {
+                        self.fellowship_create(a);
+                    }
+                }
+                "friend" => {
+                    let a = arg.trim();
+                    if a.is_empty() {
+                        self.world.chat.push("Error", "Usage: /friend <name>", ChatStyle::Error);
+                    } else {
+                        self.friend_add(a);
+                    }
+                }
+                // Not a local command: forward to the server as a TALK with the
+                // `@` prefix. This is how @lifestone, @marketplace, @pklite,
+                // @quit, @version, ... work in retail. The server runs the
+                // command (no broadcast back), so we keep a local echo of the
+                // typed line here.
                 _ => {
-                    self.world
-                        .chat
-                        .push("Error", &format!("Unknown command /{cmd}"), ChatStyle::Error);
+                    let msg = format!("@{rest}");
+                    self.send_action(messages::action::TALK, &messages::body_talk(&msg));
+                    self.world.chat.push("You", &msg, ChatStyle::Own);
                 }
             }
-        } else {
-            self.send_action(messages::action::TALK, &messages::body_talk(&text));
-            self.world.chat.push("You", &text, ChatStyle::Own);
+            return;
         }
+        // Plain speech. No local echo: the server broadcasts the HearSpeech
+        // back to us (see Incoming::HearSpeech), which displays it once —
+        // matching retail.
+        self.send_action(messages::action::TALK, &messages::body_talk(&text));
     }
 
     // ================================================================== input
@@ -1628,6 +2336,7 @@ impl App {
         // the status bar; the action dispatch may set a new one).
         if press {
             self.world.flash = None;
+            self.last_input = Instant::now();
         }
         match self.phase {
             Phase::Idle => {
@@ -1785,6 +2494,11 @@ impl App {
             }
             return;
         }
+        // An open book is modal: it captures the keys (page nav / edit).
+        if self.world.book.as_ref().is_some_and(|b| b.open) {
+            self.book_key(ev, press);
+            return;
+        }
         if self.chat_focused {
             if !press {
                 return;
@@ -1892,32 +2606,66 @@ impl App {
             KeyCode::Char('e') | KeyCode::Char('E') => self.examine(),
             // T attacks the current target (melee; combat stance first).
             KeyCode::Char('t') | KeyCode::Char('T') => self.attack(),
-            // Hotkey slots 1-9 (0 = the 10th) and the spell-bar chrome:
-            // Del/PgDn the slot, Ins/PgUp the tab, End "casts".
-            KeyCode::Char(c @ ('1'..='9')) => {
-                self.world.skills.slot = c as usize - '1' as usize;
-                self.world.flash = Some(format!("spell slot {c} (empty)"));
-            }
-            KeyCode::Char('0') => {
-                self.world.skills.slot = 9;
-                self.world.flash = Some("spell slot 0 (empty)".into());
-            }
-            KeyCode::Delete => {
-                self.world.skills.slot = (self.world.skills.slot + 9) % 10;
-                self.world.flash =
-                    Some(format!("spell slot {} (empty)", slot_label(self.world.skills.slot)));
-            }
-            KeyCode::PageDown => {
-                self.world.skills.slot = (self.world.skills.slot + 1) % 10;
-                self.world.flash =
-                    Some(format!("spell slot {} (empty)", slot_label(self.world.skills.slot)));
-            }
-            KeyCode::Insert => self.world.skills.tab = (self.world.skills.tab + 7) % 8,
-            KeyCode::PageUp => self.world.skills.tab = (self.world.skills.tab + 1) % 8,
-            KeyCode::End => {
-                self.world.flash =
-                    Some(format!("cast slot {} (empty)", slot_label(self.world.skills.slot)));
-            }
+            // Mode-scoped hotkeys (the retail keymap).
+            //   Melee/Missile: Ins power-, PgUp power+, Del Low, End Medium, PgDn High
+            //   Magic: 1-9/0 cast slot, Del/PgDn slot -/+, Ins/PgUp tab -/+, End cast
+            //   NonCombat: 0-9 = item quickslots (n/a in a TUI)
+            KeyCode::Char('0'..='9')
+            | KeyCode::Delete
+            | KeyCode::PageDown
+            | KeyCode::Insert
+            | KeyCode::PageUp
+            | KeyCode::End => match self.world.combat.mode {
+                combat_mode::MELEE | combat_mode::MISSILE => match ev.code {
+                    KeyCode::Insert => self.attack_power_down(),
+                    KeyCode::PageUp => self.attack_power_up(),
+                    KeyCode::Delete => self.set_attack_height(1),
+                    KeyCode::End => self.set_attack_height(2),
+                    KeyCode::PageDown => self.set_attack_height(3),
+                    _ => {}
+                },
+                combat_mode::MAGIC => match ev.code {
+                    KeyCode::Char(c @ ('1'..='9')) => self.use_spell_slot(c as usize - '1' as usize),
+                    KeyCode::Char('0') => self.use_spell_slot(9),
+                    KeyCode::Delete => self.cycle_spell_slot(-1),
+                    KeyCode::PageDown => self.cycle_spell_slot(1),
+                    KeyCode::Insert => self.cycle_spell_tab(-1),
+                    KeyCode::PageUp => self.cycle_spell_tab(1),
+                    KeyCode::End => self.cast_spell(),
+                    _ => {}
+                },
+                _ => {
+                    if let KeyCode::Char(c @ ('0'..='9')) = ev.code {
+                        self.world.flash = Some(format!("item quickslot {c} (n/a in TUI)"));
+                    }
+                }
+            },
+            // Soul emotes (always available): K point, I laugh, J wave, O cheer, U cry.
+            KeyCode::Char('k') | KeyCode::Char('K') => self.emote(emote_cmd::POINT, "point"),
+            KeyCode::Char('i') | KeyCode::Char('I') => self.emote(emote_cmd::LAUGH, "laugh"),
+            KeyCode::Char('j') | KeyCode::Char('J') => self.emote(emote_cmd::WAVE, "wave"),
+            KeyCode::Char('o') | KeyCode::Char('O') => self.emote(emote_cmd::CHEER, "cheer"),
+            KeyCode::Char('u') | KeyCode::Char('U') => self.emote(emote_cmd::CRY, "cry"),
+            // Stances (always available): Y ready, G sit, H crouch, B sleep.
+            KeyCode::Char('y') | KeyCode::Char('Y') => self.set_stance(motion::command::READY, "ready"),
+            KeyCode::Char('g') | KeyCode::Char('G') => self.set_stance(motion::command::SITTING, "sitting"),
+            KeyCode::Char('h') | KeyCode::Char('H') => self.set_stance(motion::command::CROUCH, "crouching"),
+            KeyCode::Char('b') | KeyCode::Char('B') => self.set_stance(motion::command::SLEEPING, "sleeping"),
+            // Social actions, contextual to the active multi-widget panel:
+            //   Fellowship (1):  v recruit, m dismiss, n make leader, p openness
+            //   Allegiance (0):  v swear to target, m break with target
+            //   Friends (2):     m remove target
+            KeyCode::Char('v') if self.multi_sel == 1 => self.fellowship_recruit(),
+            KeyCode::Char('m') if self.multi_sel == 1 => self.fellowship_dismiss(),
+            KeyCode::Char('n') if self.multi_sel == 1 => self.fellowship_new_leader(),
+            KeyCode::Char('p') if self.multi_sel == 1 => self.fellowship_toggle_openness(),
+            KeyCode::Char('v') if self.multi_sel == 0 => self.allegiance_swear(),
+            KeyCode::Char('m') if self.multi_sel == 0 => self.allegiance_break(),
+            KeyCode::Char('m') if self.multi_sel == 2 => self.friend_remove(),
+            //   Spellbook (4):     p add to bar, m remove from bar, v forget
+            KeyCode::Char('p') if self.multi_sel == 4 => self.spell_favorite_add(),
+            KeyCode::Char('m') if self.multi_sel == 4 => self.spell_favorite_remove(),
+            KeyCode::Char('v') if self.multi_sel == 4 => self.spell_forget(),
             // Enter / Tab open chat (the retail ToggleChatEntry); Esc the
             // menu; Shift+Esc logs off the world.
             KeyCode::Enter | KeyCode::Tab => {
@@ -2241,6 +2989,23 @@ impl App {
                 }
                 let _ = self.world.far_cull(mv.cell, &mv.pos, &keep, now);
                 self.last_cull = Some(now);
+            }
+        }
+        // In-world timers: game-level ping (10 s), the target health
+        // heartbeat (1 Hz), and the idle logout (1200 s of no input).
+        if self.phase == Phase::InWorld && !self.world.dead {
+            if self.last_game_ping.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(10)) {
+                self.send_action(messages::action::PING_REQUEST, &messages::body_ping_request());
+                self.last_game_ping = Some(now);
+            }
+            if let Some(g) = self.world.target_guid {
+                if self.last_target_health.is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1)) {
+                    self.send_action(messages::action::QUERY_HEALTH, &messages::body_query_health(g));
+                    self.last_target_health = Some(now);
+                }
+            }
+            if now.duration_since(self.last_input) >= Duration::from_secs(1200) {
+                self.logout();
             }
         }
     }

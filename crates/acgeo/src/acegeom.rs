@@ -745,12 +745,15 @@ pub fn key_to_slot_map(keys: &[u16]) -> Option<Vec<i32>> {
 
 const T_PORT: u32 = 0x504f5254;
 const T_LEAF: u32 = 0x4c454146;
-const T_BPNN: u32 = 0x42506e6e;
-const T_BPIN: u32 = 0x4250496e;
-const T_BpIN: u32 = 0x4270494e;
-const T_BpnN: u32 = 0x42706e4e;
-const T_BPIn: u32 = 0x4250494e; // "BPIn" (both children)
-const T_BpnN2: u32 = 0x42506e4e; // "BpnN" (both children)
+// Interior node markers: 4-byte ASCII tags; two spellings exist for each
+// child combination (the retail parser accepts both). The comment carries
+// the exact retail marker.
+const T_BPNN: u32 = 0x42506e6e;   // "BPnn" — positive child only
+const T_BP_IN: u32 = 0x4250496e;  // "BPIn" — positive child only
+const T_BPIN: u32 = 0x4270494e;   // "BpIN" — negative child only
+const T_BPN_N: u32 = 0x42706e4e;  // "BpnN" — negative child only
+const T_BP_IN2: u32 = 0x4250494e; // "BPIN" — both children
+const T_BPN_N2: u32 = 0x42506e4e; // "BPNn" — both children
 
 /// Which BSP layout is being skipped.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -802,9 +805,9 @@ fn skip_bsp_node(r: &mut R, kind: BspKind, depth: usize) -> Option<()> {
     // interior node
     r.bytes(16)?; // SplittingPlane
     let (pos, neg) = match ty {
-        T_BPNN | T_BPIN => (true, false),
-        T_BpIN | T_BpnN => (false, true),
-        T_BPIn | T_BpnN2 => (true, true),
+        T_BPNN | T_BP_IN => (true, false),
+        T_BPIN | T_BPN_N => (false, true),
+        T_BP_IN2 | T_BPN_N2 => (true, true),
         // unknown node marker: C# reads no children for unlisted types
         _ => (false, false),
     };
@@ -1051,9 +1054,9 @@ fn physics_bsp_node(r: &mut R, solid: bool, depth: usize) -> Option<bool> {
     }
     r.bytes(16)?; // SplittingPlane
     let (pos, neg) = match ty {
-        T_BPNN | T_BPIN => (true, false),
-        T_BpIN | T_BpnN => (false, true),
-        T_BPIn | T_BpnN2 => (true, true),
+        T_BPNN | T_BP_IN => (true, false),
+        T_BPIN | T_BPN_N => (false, true),
+        T_BP_IN2 | T_BPN_N2 => (true, true),
         _ => (false, false),
     };
     let mut s = solid;

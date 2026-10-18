@@ -33,8 +33,10 @@ pub const CULL_DISTANCE: f32 = 192.0;
 pub const CULL_GRACE_SECS: f64 = 25.0;
 
 /// A world item (self inventory, vendor, trade, or loot). Fizzle-side copy of
-/// the `ObjectCreate` / inventory item fields the UI shows.
+/// the `ObjectCreate` / inventory item fields the UI shows. Some fields are
+/// not yet consumed by the UI.
 #[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
 pub struct ItemState {
     pub guid: u32,
     pub name: String,
@@ -160,10 +162,6 @@ impl ChatLog {
     pub fn iter(&self) -> impl Iterator<Item = &ChatLine> {
         self.lines.iter()
     }
-
-    pub fn lines(&self) -> impl DoubleEndedIterator<Item = &ChatLine> {
-        self.lines.iter().rev()
-    }
 }
 
 /// Self vitals, from `PlayerDescription` and health events.
@@ -176,10 +174,16 @@ pub struct Vitals {
     pub mana: Option<u32>,
     pub mana_max: Option<u32>,
     pub attrs: [u32; 6], // Str, End, Coord, Quick, Focus, Self
+    /// Total experience (PropertyInt64 TOTAL_EXPERIENCE).
+    pub xp: i64,
+    /// Vitae death-penalty multiplier (1.0 = no penalty), from the
+    /// enchantment registry.
+    pub vitae: Option<f32>,
 }
 
-/// The player's inventory (main pack + equipped + purse).
+/// The player's inventory (main pack + equipped + purse). Some fields are not yet
 #[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
 pub struct Inventory {
     /// Items in the main pack.
     pub pack: Vec<ItemState>,
@@ -198,8 +202,9 @@ pub struct Inventory {
     pub doll_sel: usize,
 }
 
-/// One line in the vendor list.
+/// One line in the vendor list. Some fields are not yet consumed by the UI.
 #[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
 pub struct VendorItem {
     pub guid: u32,
     pub name: String,
@@ -211,8 +216,9 @@ pub struct VendorItem {
     pub sell_price: f32,
 }
 
-/// The open vendor shop.
+/// The open vendor shop. Some fields are not yet consumed by the UI.
 #[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
 pub struct VendorState {
     pub guid: u32,
     pub name: String,
@@ -272,6 +278,8 @@ pub struct Contract {
 pub struct Fellowship {
     pub leader: String,
     pub members: Vec<String>,
+    /// Whether the fellowship accepts recruits (openness).
+    pub open: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -344,6 +352,62 @@ pub struct Skills {
     pub slot: usize,
 }
 
+/// Combat + stance state, session-managed and shown in the You pane.
+///
+/// `mode` is the retail `CombatMode` bitmask (see `acproto::messages::combat_mode`);
+/// the default mode is derived from the equipped weapon's `cur_loc`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Combat {
+    /// Combat-mode bitmask: 1 NonCombat / 2 Melee / 4 Missile / 8 Magic.
+    pub mode: u32,
+    /// Attack height: 1 Low / 2 Medium / 3 High.
+    pub height: u32,
+    /// Attack power (0.0..=1.0); reused as missile accuracy.
+    pub power: f32,
+    /// Current stance motion command (`motion::command::*`), 0 when none.
+    pub stance: u32,
+}
+
+impl Combat {
+    /// A fresh combat state: Medium height, 0.5 power, NonCombat, no stance.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            mode: acproto::messages::combat_mode::NON_COMBAT,
+            height: 2,
+            power: 0.5,
+            stance: 0,
+        }
+    }
+}
+
+/// One page of an open book (text + author, as fetched).
+#[derive(Clone, Debug, Default)]
+pub struct BookPage {
+    pub index: u32,
+    pub author: String,
+    pub text: String,
+}
+
+/// An open book (from `BookDataResponse`), with a read/write cursor.
+#[derive(Clone, Debug, Default)]
+pub struct BookState {
+    pub guid: u32,
+    pub name: String,
+    pub max_pages: u32,
+    pub max_chars: u32,
+    pub pages: Vec<BookPage>,
+    pub inscription: String,
+    pub author: String,
+    /// Currently displayed page index.
+    pub current: usize,
+    /// Whether the write/edit mode is active.
+    pub editing: bool,
+    /// The page text being edited.
+    pub buffer: String,
+    pub open: bool,
+}
+
 /// The tracked world.
 #[derive(Clone, Debug, Default)]
 pub struct World {
@@ -361,6 +425,19 @@ pub struct World {
     pub vendor: VendorState,
     pub trade: TradeState,
     pub container: ContainerState,
+    /// Combat/stance/height/power state.
+    pub combat: Combat,
+    /// The currently targeted entity's guid (mirrors `targets[target_index]`).
+    pub target_guid: Option<u32>,
+    /// Live target health (from the `QueryHealth`/`UpdateHealth` heartbeat).
+    pub target_health: Option<u32>,
+    pub target_health_max: Option<u32>,
+    /// Last measured ping RTT in milliseconds (None until first response).
+    pub ping_rtt_ms: Option<f64>,
+    /// The name of the last player to `/t`ell us (for reply prefill).
+    pub last_teller: Option<String>,
+    /// The open book (if any).
+    pub book: Option<BookState>,
     /// One-shot status flash (cleared after it is shown once).
     pub flash: Option<String>,
 }
@@ -371,7 +448,9 @@ pub const RADAR_RANGE: f32 = 96.0;
 impl World {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        let mut w = Self::default();
+        w.combat = Combat::new();
+        w
     }
 
     fn upsert(&mut self, guid: u32, is_player: bool) -> &mut Entity {
@@ -502,6 +581,19 @@ impl World {
         self.inventory.coin_value = d.coin_value;
         self.inventory.strength = d.strength;
         self.inventory.encumbrance = d.encumbrance;
+        // Total experience (PropertyInt64 key 1).
+        self.vitals.xp = d
+            .int64s
+            .iter()
+            .find(|(k, _)| *k == acproto::messages::property_int64::TOTAL_EXPERIENCE)
+            .map(|(_, v)| *v)
+            .unwrap_or(0);
+        // Vitae death-penalty multiplier (spell 666 in the enchantment registry).
+        self.vitals.vitae = d
+            .enchantments
+            .iter()
+            .find(|e| e.spell_id == 666)
+            .map(|e| e.stat_mod_value);
     }
 
     /// Display name of a tracked entity (empty when unknown).
@@ -582,16 +674,62 @@ impl World {
         }
     }
 
-    /// Self health from UpdateHealth event (f32 0..1 of max).
+    /// Health from an UpdateHealth event (f32 0..1 of max). Applies to self,
+    /// or — when the guid is the current target — to the live target-health
+    /// display (driven by the `QueryHealth` heartbeat).
     pub fn update_health_event(&mut self, guid: u32, pct: f32) {
-        if Some(guid) != self.self_guid {
+        let pct = pct.clamp(0.0, 1.0);
+        if Some(guid) == self.self_guid {
+            if let Some(max) = self.vitals.health_max {
+                let h = (pct * max as f32) as u32;
+                self.vitals.health = Some(h);
+                self.dead = h == 0;
+            }
             return;
         }
-        if let Some(max) = self.vitals.health_max {
-            let h = (pct.clamp(0.0, 1.0) * max as f32) as u32;
-            self.vitals.health = Some(h);
-            self.dead = h == 0;
+        if Some(guid) == self.target_guid {
+            if let Some(max) = self.target_health_max {
+                self.target_health = Some((pct * max as f32) as u32);
+            }
+            // Also refresh the tracked entity's health (examine / radar).
+            if let Some(e) = self.entities.get_mut(&guid) {
+                if let Some(emax) = e.health_max {
+                    e.health = Some((pct * emax as f32) as u32);
+                }
+            }
         }
+    }
+
+    /// The retail default combat mode from the equipped weapon
+    /// (`GetDefaultCombatMode`): a missile weapon in hand → Missile, a wand
+    /// (Held slot) → Magic, otherwise Melee.
+    #[must_use]
+    pub fn default_combat_mode(&self) -> u32 {
+        use acproto::messages::combat_mode as cm;
+        const MISSILE_WEAPON: i32 = 0x0040_0000;
+        const HELD: i32 = 0x0100_0000;
+        let mut missile = false;
+        let mut magic = false;
+        for item in &self.inventory.equipped {
+            if item.cur_loc & MISSILE_WEAPON != 0 {
+                missile = true;
+            } else if item.cur_loc & HELD != 0 {
+                magic = true;
+            }
+        }
+        if missile {
+            cm::MISSILE
+        } else if magic {
+            cm::MAGIC
+        } else {
+            cm::MELEE
+        }
+    }
+
+    /// Whether a chat sender name is in the squelch (filter) list.
+    #[must_use]
+    pub fn squelched(&self, name: &str) -> bool {
+        !name.is_empty() && self.social.squelch.iter().any(|s| s == name)
     }
 
     /// Self damage from a DefenderNotification.

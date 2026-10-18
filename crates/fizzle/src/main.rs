@@ -129,10 +129,17 @@ fn main() -> anyhow::Result<()> {
     app.world3d = Some(World3D::new(app.dat_dir.as_deref()));
     app.start();
 
-    match cli.ui.as_str() {
+    let result = match cli.ui.as_str() {
         "plain" => plain::run(&mut app),
         _ => run_event_loop(&mut app),
-    }
+    };
+    // Persist the live UI settings (theme / in-world view / glow halos) so the
+    // next launch picks them up.
+    profiles.theme = app.theme.name().to_string();
+    profiles.world_view = if app.world_view { "3d" } else { "tactical" }.to_string();
+    profiles.glow_actors = app.glow_actors;
+    let _ = profiles.save();
+    result
 }
 
 fn run_event_loop(app: &mut App) -> anyhow::Result<()> {

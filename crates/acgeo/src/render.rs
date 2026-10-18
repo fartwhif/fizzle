@@ -40,6 +40,12 @@ const ZOOM_TAU: f64 = 0.25;
 const ZOOM_MIN: f32 = 0.2;
 /// How far (world units) in front of the blocking surface the camera stops.
 const ZOOM_MARGIN: f32 = 0.75;
+/// Closest the user's camera back distance may be (world units).
+const BACK_MIN: f32 = 4.0;
+/// Farthest the user's camera back distance may be (world units).
+const BACK_MAX: f32 = 48.0;
+/// Per-notch wheel zoom factor (zoom in multiplies by it, out divides).
+const ZOOM_STEP: f32 = 0.8;
 
 const RETICLE_PERIOD: f64 = 1.2;
 const MIN_RETICLE: f32 = 8.0;
@@ -80,9 +86,16 @@ const MCMD_SIDESTEP_LEFT: u32 = 0x65000010;
 // public state types
 // ---------------------------------------------------------------------------
 
-/// Eased camera-occlusion zoom state (shared across frames): the smoothed
-/// back distance and the time of the last update.
+/// Camera zoom state (shared across frames): the user's desired back
+/// distance, the smoothed current back distance, and the time of the last
+/// update. The occlusion system may pull the actual camera in past
+/// `user_back` (geometry between the player and the camera), but never lets
+/// it go farther back than `user_back`.
 pub struct Zoom {
+    /// The user's desired base back distance (wheel-controlled, clamped to
+    /// `[BACK_MIN, BACK_MAX]`).
+    user_back: f32,
+    /// The smoothed current back distance (occlusion-adjusted).
     back: f32,
     last_now: f64,
 }
@@ -91,9 +104,31 @@ impl Zoom {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            user_back: CAM_BACK,
             back: CAM_BACK,
             last_now: -1.0,
         }
+    }
+
+    /// The user's desired base back distance (for UI display).
+    #[must_use]
+    pub fn user_back(&self) -> f32 {
+        self.user_back
+    }
+
+    /// Zoom in (camera closer) by one wheel notch.
+    pub fn zoom_in(&mut self) {
+        self.user_back = (self.user_back * ZOOM_STEP).max(BACK_MIN);
+    }
+
+    /// Zoom out (camera farther) by one wheel notch.
+    pub fn zoom_out(&mut self) {
+        self.user_back = (self.user_back / ZOOM_STEP).min(BACK_MAX);
+    }
+}
+impl Default for Zoom {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -238,20 +273,25 @@ fn tri_t(
 }
 
 /// The camera back distance that keeps the line of sight to the player:
-/// CAM.back, unless the landblock's static geometry (terrain, building
+/// `back_target`, unless the landblock's static geometry (terrain, building
 /// meshes) crosses the ray from the player's chest to the ideal camera
-/// position, in which case just in front of the nearest hit. The ray is the
-/// full chest->ideal-camera segment, so geometry BEYOND the ideal camera
-/// never occludes.
+/// position (at `back_target` behind), in which case just in front of the
+/// nearest hit. The ray is the full chest->ideal-camera segment, so geometry
+/// BEYOND the ideal camera never occludes.
 fn occlude_camera_back(
     soup: Option<&[f32]>,
     statics: &[Solid],
     cam: &Camera,
+    back_target: f32,
 ) -> f32 {
     let h = cam.heading;
     let (fx, fy) = (h.sin(), h.cos());
     let (ox, oy, oz) = (cam.x, cam.y, cam.z + CAM_LOOK_UP);
-    let (ix, iy, iz) = (-fx * CAM_BACK, -fy * CAM_BACK, CAM_UP - CAM_LOOK_UP);
+    // Ideal camera at `back_target` behind: horizontally `-fx*back_target`,
+    // and `CAM_UP * (back_target / CAM_BACK)` above the feet (see
+    // camera_basis — a pure dolly). The ray runs chest -> that point.
+    let cam_h = CAM_UP * (back_target / CAM_BACK);
+    let (ix, iy, iz) = (-fx * back_target, -fy * back_target, cam_h - CAM_LOOK_UP);
     let l = (ix * ix + iy * iy + iz * iz).sqrt();
     let (dx, dy, dz) = (ix / l, iy / l, iz / l);
     let mut best = l;
@@ -285,9 +325,9 @@ fn occlude_camera_back(
         }
     }
     if best >= l {
-        CAM_BACK
+        back_target
     } else {
-        (CAM_BACK * ZOOM_MIN).max(CAM_BACK * ((best - ZOOM_MARGIN) / l))
+        (back_target * ZOOM_MIN).max(back_target * ((best - ZOOM_MARGIN) / l))
     }
 }
 
@@ -1043,8 +1083,11 @@ pub fn render_frame(
         return None;
     }
 
-    // Camera basis (the zoomed camera is shared with the reticle/glow).
-    let back = smooth_camera_zoom(zoom, occlude_camera_back(block_soup, statics, cam), now);
+    // Camera basis (the zoomed camera is shared with the reticle/glow). The
+    // user's base back distance sets how far the camera wants to sit; the
+    // occlusion pass may pull it in past blocking geometry, never farther.
+    let target = occlude_camera_back(block_soup, statics, cam, zoom.user_back);
+    let back = smooth_camera_zoom(zoom, target, now);
     let basis = camera_basis(cam, cols, rows, back);
 
     // Sky: a top->bottom blue gradient fills the pane before geometry.
@@ -1212,6 +1255,82 @@ mod tests {
         )
         .expect("second frame");
         assert_eq!(frame2.cells.len(), 80 * 24);
+    }
+
+    #[test]
+    fn zoom_notches_clamp_and_change_back() {
+        // A single notch in / out moves the base distance from the default.
+        let mut zin = Zoom::new();
+        zin.zoom_in();
+        assert!(zin.user_back() < CAM_BACK, "zoom-in lowers the base distance");
+        let mut zout = Zoom::new();
+        zout.zoom_out();
+        assert!(zout.user_back() > CAM_BACK, "zoom-out raises the base distance");
+
+        // Many notches clamp at the limits and stay clamped.
+        let mut zin = Zoom::new();
+        for _ in 0..64 {
+            zin.zoom_in();
+        }
+        assert!((zin.user_back() - BACK_MIN).abs() < 1e-3, "zoom-in clamps at BACK_MIN");
+        let mut zout = Zoom::new();
+        for _ in 0..64 {
+            zout.zoom_out();
+        }
+        assert!((zout.user_back() - BACK_MAX).abs() < 1e-3, "zoom-out clamps at BACK_MAX");
+    }
+
+    #[test]
+    fn zoom_changes_framing() {
+        let Some(mut scene) = test_scene() else {
+            eprintln!("skipped: retail dats unavailable");
+            return;
+        };
+        let lb = 0x3073u32;
+        let statics = scene.solids_for_block(lb);
+        let doors = HashMap::new();
+        let cam = Camera {
+            x: 96.0,
+            y: 96.0,
+            z: scene.height_at(lb, 96.0, 96.0).unwrap_or(0.0),
+            heading: 0.7,
+        };
+        // Same camera + terrain, only the zoom level differs. Stationary
+        // (no actors / animation) so the only variable is the camera dolly.
+        let mut render = |zoom: &mut Zoom| {
+            let mut anim = HashMap::new();
+            render_frame(
+                &mut scene,
+                zoom,
+                &mut anim,
+                &statics,
+                &doors,
+                lb,
+                &cam,
+                &[],
+                80,
+                24,
+                false,
+                None,
+            )
+            .expect("frame for a known landblock")
+            .cells
+        };
+        let mut z = Zoom::new();
+        let default = render(&mut z);
+        let mut zin = Zoom::new();
+        for _ in 0..4 {
+            zin.zoom_in();
+        }
+        let close = render(&mut zin);
+        let mut zout = Zoom::new();
+        for _ in 0..4 {
+            zout.zoom_out();
+        }
+        let far = render(&mut zout);
+        assert_ne!(close, default, "zoom-in changes the framing");
+        assert_ne!(far, default, "zoom-out changes the framing");
+        assert_ne!(close, far, "closer and farther differ");
     }
 
     #[test]

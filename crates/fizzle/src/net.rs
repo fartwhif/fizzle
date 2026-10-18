@@ -106,6 +106,7 @@ impl Net {
     }
 
     /// The current NetID (0 until `ConnectRequest` is seen).
+    #[allow(dead_code)]
     #[must_use]
     pub fn net_id(&self) -> u16 {
         self.net_id
