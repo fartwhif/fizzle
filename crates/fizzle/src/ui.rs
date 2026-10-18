@@ -3420,7 +3420,14 @@ fn pick_world3d(app: &App, lb: WLayout, r: u16, c: u16) -> Option<u32> {
         z: sp.z,
         heading,
     };
-    let basis = camera_basis(&cam, cols, rows, CAM_BACK);
+    // Use the renderer's live camera distance (it tracks the wheel zoom), so
+    // the pick projection lines up with what's on screen — not the default.
+    let back = app
+        .world3d
+        .as_ref()
+        .map(|w| w.camera_back())
+        .unwrap_or(CAM_BACK);
+    let basis = camera_basis(&cam, cols, rows, back);
     let px = (c - 1) as f32;
     let py = (r - lb.world_y0 - 1) as f32;
     let mut best: Option<(u32, f32)> = None;
@@ -3554,6 +3561,10 @@ fn left_down(app: &mut App, area: Rect, r: u16, c: u16) {
     if r >= lb.world_y0 + 1 && r <= lb.world_y1 - 2 && c >= 1 && c <= lb.left_w - 2 {
         if let Some(guid) = pick_world_at(app, lb, r, c) {
             set_target_by_guid(app, guid);
+            // Commit the target (target_guid) — set_target_by_guid only points
+            // the index; appraise_current sends the server query so the status
+            // bar and reticle lock onto the clicked entity.
+            app.appraise_current();
             if (app.world.combat.mode == combat_mode::MELEE
                 || app.world.combat.mode == combat_mode::MISSILE)
                 && target_kind_for(app, guid) == 0 {

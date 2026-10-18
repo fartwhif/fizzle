@@ -171,6 +171,14 @@ impl World3D {
         self.zoom.zoom_out();
     }
 
+    /// The camera's current (smoothed) back distance, in world units — the
+    /// distance the renderer is using this frame. The fizzle click-pick
+    /// projection uses this to line up with the on-screen framing after a zoom.
+    #[must_use]
+    pub fn camera_back(&self) -> f32 {
+        self.zoom.back()
+    }
+
     /// Re-base the static solid geometry on a landblock (no-op when unchanged).
     pub fn set_landblock(&mut self, lb: u32) {
         if lb == self.cur_lb {

@@ -1375,13 +1375,18 @@ impl App {
         };
         // Keep the target stable by guid: the list is sorted by distance, so a
         // given entity's index shifts every refresh as entities move. Re-find
-        // the targeted guid's position; drop the target if it fell out of
-        // range. (Reading `targets[target_index]` directly made the displayed
-        // target silently change to whatever entity landed at that index.)
+        // the targeted guid's position. If it's out of the range list (moved
+        // beyond RADAR_RANGE or to another landblock) we keep it — the 3D view
+        // renders the whole landblock, so a target can sit out of the 96-u radar
+        // range — and only clear it if the entity has actually despawned.
         match self.world.target_guid.and_then(|g| self.targets.iter().position(|&t| t == g)) {
             Some(i) => self.world.target_index = i,
             None => {
-                self.world.target_guid = None;
+                if let Some(g) = self.world.target_guid {
+                    if !self.world.entities.contains_key(&g) {
+                        self.world.target_guid = None;
+                    }
+                }
                 self.world.target_index = 0;
             }
         }
@@ -3241,6 +3246,69 @@ mod tests {
             Some(1),
             "target must stay A across the reorder, not drift to the new index-0"
         );
+    }
+
+    /// Regression for "targeting is flaky — hit a key to target, it works,
+    /// then instantly untargets": the target was dropped the moment it fell
+    /// out of the distance-sorted range list (moved beyond RADAR_RANGE or to
+    /// another landblock), even though the user just targeted it. The 3D view
+    /// renders the whole landblock, so a target can sit out of the 96-u radar
+    /// range. Retail holds the target until you untarget; only a despawned
+    /// entity should clear it.
+    #[test]
+    fn target_persists_when_out_of_range() {
+        use acproto::codec::Vec3;
+        use crate::movement::Movement;
+        use crate::world::Entity;
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        let cell = 0x0001_0000u32;
+        app.movement = Some(Movement::new(cell, Vec3 { x: 0.0, y: 0.0, z: 0.0 }));
+        let ent = |guid: u32, x: f32| Entity {
+            guid,
+            name: None,
+            cell,
+            pos: Vec3 { x, y: 0.0, z: 0.0 },
+            rot: [1.0, 0.0, 0.0, 0.0],
+            is_player: true,
+            health: Some(100),
+            health_max: Some(100),
+            mana: None,
+            mana_max: None,
+            item_type: 0,
+            setup_id: None,
+            mtable_id: None,
+            model_parts: None,
+            motion_cmd: 0,
+            physics_state: 0,
+            is_vendor: false,
+            last_seen: Instant::now(),
+        };
+        // A creature 150 u away — beyond RADAR_RANGE (96). Out of the range
+        // list, but still in the world: the refresh must keep the target.
+        app.world.entities.insert(7, ent(7, 150.0));
+        app.target_kind = 0;
+        app.world.target_guid = Some(7);
+        app.refresh_targets();
+        assert_eq!(
+            app.current_target(),
+            Some(7),
+            "target must persist when it falls out of the range list, not instantly untarget"
+        );
+    }
+
+    /// The flip side of `target_persists_when_out_of_range`: a target whose
+    /// entity has despawned (gone from the entity map) must still clear.
+    #[test]
+    fn target_clears_when_despawned() {
+        use acproto::codec::Vec3;
+        use crate::movement::Movement;
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        let cell = 0x0001_0000u32;
+        app.movement = Some(Movement::new(cell, Vec3 { x: 0.0, y: 0.0, z: 0.0 }));
+        app.target_kind = 0;
+        app.world.target_guid = Some(7); // no entity 7 in the map: it despawned
+        app.refresh_targets();
+        assert_eq!(app.current_target(), None, "a despawned target must clear");
     }
 
     fn character_error_packet(code: u32) -> Vec<u8> {

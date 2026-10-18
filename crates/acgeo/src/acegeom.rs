@@ -255,6 +255,24 @@ pub fn compose3(o: &Frame, p: &Frame, f: &Frame) -> ([f32; 4], [f32; 3]) {
     (q, t)
 }
 
+/// The model scale factor applied to actor meshes. The retail GfxObj body
+/// meshes are only ~0.825 world-units tall, but the renderer's glow,
+/// reticle, and the click-pick anchor all assume a ~2.8-unit humanoid —
+/// without this scale the character renders at ~30% of its intended height.
+pub const ACTOR_SCALE: f32 = 3.4;
+/// The model's rest pose floats ~0.47 u below its origin; scaled by
+/// `ACTOR_SCALE` that becomes ~1.6 u. Lift the body so its feet sit at the
+/// actor's z (the ground), matching the glow/reticle/pick convention.
+pub const ACTOR_GROUND_LIFT: f32 = 1.6;
+
+
+/// Rotate by q, scale by s, and add t — the per-vertex transform for a
+/// composed part with a model scale factor (see `ACTOR_SCALE`).
+#[inline]
+pub fn rot_st(q: [f32; 4], x: f32, y: f32, z: f32, s: f32, t: [f32; 3]) -> [f32; 3] {
+    rot_t(q, x * s, y * s, z * s, t)
+}
+
 /// Rotate by q and add t (the per-vertex transform for a composed part).
 #[inline]
 pub fn rot_t(q: [f32; 4], x: f32, y: f32, z: f32, t: [f32; 3]) -> [f32; 3] {

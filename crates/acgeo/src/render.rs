@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::acegeom::{self, Animation, AnimRef, Frame, MotionTable, IDENTITY};
+use crate::acegeom::{self, ACTOR_GROUND_LIFT, ACTOR_SCALE, Animation, AnimRef, Frame, MotionTable, IDENTITY};
 use crate::scene::{mat_color, NULL_PART, Scene};
 use crate::{wrap_block_coord, Aabb, Actor, Camera, Frame3D, ReticleTarget, Solid};
 
@@ -24,7 +24,6 @@ const CAM_UP: f32 = 6.5;
 const CAM_LOOK_UP: f32 = 1.5;
 const CAM_FOCAL_K: f32 = 1.0;
 const CAM_NEAR: f32 = 0.5;
-
 const LIGHT: (f32, f32, f32) = (0.35, 0.35, 0.87);
 const LIGHT_AMBIENT: f32 = 0.38;
 const LIGHT_DIFFUSE: f32 = 0.8;
@@ -114,6 +113,15 @@ impl Zoom {
     #[must_use]
     pub fn user_back(&self) -> f32 {
         self.user_back
+    }
+
+    /// The smoothed current back distance (occlusion-adjusted) — the camera
+    /// distance the renderer is actually using this frame. The click-pick
+    /// projection must use this (not the default `CAM_BACK`) to line up with
+    /// what's on screen after a zoom.
+    #[must_use]
+    pub fn back(&self) -> f32 {
+        self.back
     }
 
     /// Zoom in (camera closer) by one wheel notch.
@@ -1020,15 +1028,21 @@ fn build_dynamic_soup(
 
             let pf = pose.part_frames.get(pi).copied().unwrap_or(IDENTITY);
             let (q, t) = acegeom::compose3(&obj, &pose.pos_frame, &pf);
+            // Bring the model's feet to the actor's z (the ground): the mesh's
+            // rest pose floats ~0.47 u below its origin, and the ACTOR_SCALE
+            // amplifies that offset. The glow/reticle/pick all treat the
+            // actor's z as the feet, so the body must sit there too.
+            let mut t = t;
+            t[2] += ACTOR_GROUND_LIFT;
 
             let (pos, tris, tri_mat, mats) = (&mesh.pos, &mesh.tris, &mesh.tri_mat, &mesh.mats);
             for ti in (0..tris.len()).step_by(3) {
                 let ia = tris[ti] as usize * 3;
                 let ib = tris[ti + 1] as usize * 3;
                 let ic = tris[ti + 2] as usize * 3;
-                let va = acegeom::rot_t(q, pos[ia], pos[ia + 1], pos[ia + 2], t);
-                let vb = acegeom::rot_t(q, pos[ib], pos[ib + 1], pos[ib + 2], t);
-                let vc = acegeom::rot_t(q, pos[ic], pos[ic + 1], pos[ic + 2], t);
+                let va = acegeom::rot_st(q, pos[ia], pos[ia + 1], pos[ia + 2], ACTOR_SCALE, t);
+                let vb = acegeom::rot_st(q, pos[ib], pos[ib + 1], pos[ib + 2], ACTOR_SCALE, t);
+                let vc = acegeom::rot_st(q, pos[ic], pos[ic + 1], pos[ic + 2], ACTOR_SCALE, t);
                 let [mr, mg, mb] = mat_color(mats[tri_mat[ti / 3] as usize]);
                 out.extend_from_slice(&[
                     va[0], va[1], va[2], vb[0], vb[1], vb[2], vc[0], vc[1], vc[2], mr, mg, mb,
