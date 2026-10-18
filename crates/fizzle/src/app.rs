@@ -13,7 +13,7 @@ use crate::movement::{HeldKeys, Movement, TICK};
 use crate::net::{Net, NetEvent};
 use acgeo::{World3D, WorldProbe};
 use crate::themes::Theme;
-use crate::world::{BookPage, BookState, ChatStyle, Combat, ItemState, World};
+use crate::world::{BookPage, BookState, ChatStyle, Combat, ItemState, World, ITEM_TYPE_CREATURE};
 /// Auto-reconnect backoff (Stockpile parity): start 10 s, double per failed
 /// attempt, cap 5 min. A successful login resets the sequence.
 const RECONNECT_MIN_MS: u64 = 10_000;
@@ -1512,7 +1512,13 @@ impl App {
         // Copy the fields out so the entity borrow ends before any
         // mutable self use below.
         let (is_creature, is_player, is_vendor, item_type, name) = match self.world.entities.get(&guid) {
-            Some(e) => (e.is_player || e.health.is_some(), e.is_player, e.is_vendor, e.item_type, e.display_name()),
+            Some(e) => (
+                e.is_player || e.item_type == ITEM_TYPE_CREATURE,
+                e.is_player,
+                e.is_vendor,
+                e.item_type,
+                e.display_name(),
+            ),
             None => {
                 self.world.flash = Some("target out of range".into());
                 return;
@@ -1565,7 +1571,11 @@ impl App {
             return;
         };
         let (is_creature, item_type, name) = match self.world.entities.get(&guid) {
-            Some(e) => (e.is_player || e.health.is_some(), e.item_type, e.display_name()),
+            Some(e) => (
+                e.is_player || e.item_type == ITEM_TYPE_CREATURE,
+                e.item_type,
+                e.display_name(),
+            ),
             None => {
                 self.world.flash = Some("target out of range".into());
                 return;

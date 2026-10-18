@@ -24,6 +24,8 @@ pub const PHYSICS_ETHEREAL: u32 = 0x00020000;
 pub const ITEM_TYPE_DOOR: u32 = 128;
 /// Item type for a Container (chest / corpse / side pack).
 pub const ITEM_TYPE_CONTAINER: u32 = 512;
+/// Item type for a Creature (retail `ItemType::Creature` = 16).
+pub const ITEM_TYPE_CREATURE: u32 = 16;
 /// Main pack capacity (retail).
 pub const MAIN_PACK_CAPACITY: usize = 102;
 
@@ -793,7 +795,7 @@ impl World {
     #[must_use]
     pub fn targets_of_kind(&self, self_cell: u32, self_pos: &Vec3, kind: u8) -> Vec<u32> {
         let block = (self_cell >> 16) & 0xFFFF;
-        let is_creature = |e: &Entity| e.is_player || e.health.is_some() || e.item_type == 0;
+        let is_creature = |e: &Entity| e.is_player || e.item_type == ITEM_TYPE_CREATURE || e.item_type == 0;
         let mut v: Vec<(f32, u32)> = self
             .entities
             .values()

@@ -27,7 +27,7 @@ use crate::themes::Theme;
 use acproto::messages::combat_mode;
 use crate::world::{
     ChatStyle, Entity, Inventory, ItemState, VendorItem, VendorState, MAIN_PACK_CAPACITY,
-    ITEM_TYPE_CONTAINER, ITEM_TYPE_DOOR,
+    ITEM_TYPE_CONTAINER, ITEM_TYPE_CREATURE, ITEM_TYPE_DOOR,
 };
 use acgeo::{Actor, Camera, ReticleTarget, get_dereth_land, wrap_block_coord, ACTOR_SCALE};
 
@@ -52,8 +52,6 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(450);
 const PICK_RADIUS: f32 = 3.0;
 /// The merchant "key" item-type flag (a dropped key is used, not stored).
 const ITEM_TYPE_KEY: u32 = 0x4000;
-/// Creature item type (retail `ItemType::Creature`).
-const ITEM_TYPE_CREATURE: u32 = 16;
 /// Ground item (corpse / dropped container) item type.
 const ITEM_TYPE_GROUND: u32 = 32;
 /// POI markers are not plotted on the radar.
@@ -3500,7 +3498,7 @@ fn target_kind_for(app: &App, guid: u32) -> u8 {
     };
     if e.is_player {
         2
-    } else if e.health.is_some() || e.item_type == 0 || e.item_type == ITEM_TYPE_CREATURE {
+    } else if e.item_type == 0 || e.item_type == ITEM_TYPE_CREATURE {
         0
     } else {
         1
