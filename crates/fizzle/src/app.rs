@@ -1405,6 +1405,7 @@ impl App {
         }
         let len = self.targets.len() as i32;
         self.world.target_index = ((self.world.target_index as i32 + dir).rem_euclid(len)) as usize;
+        self.world.target_guid = self.targets.get(self.world.target_index).copied();
         self.appraise_current();
     }
 
@@ -1428,12 +1429,23 @@ impl App {
             .position(|g| Some(*g) != self.world.self_guid)
             .unwrap_or(0);
         self.world.target_index = idx;
+        self.world.target_guid = self.targets.get(idx).copied();
         self.appraise_current();
     }
 
     /// Send IdentifyObject + QueryHealth for the current target.
     pub fn appraise_current(&mut self) {
-        let Some(guid) = self.targets.get(self.world.target_index).copied() else {
+        // Resolve by the stable guid, not the list index: the distance-sorted
+        // target list reorders every tick, and refresh_targets parks the index
+        // at 0 when the target drifts out of the 96-u radar range (the 3D view
+        // still renders the whole landblock). A stale index would either wipe
+        // a live target (the name vanishing on examine) or silently re-target
+        // the nearest entity. Callers commit target_guid to the pick first.
+        let Some(guid) = self
+            .world
+            .target_guid
+            .filter(|g| self.world.entities.contains_key(g))
+        else {
             self.world.target_guid = None;
             self.world.target_health = None;
             self.world.target_health_max = None;
@@ -3057,7 +3069,7 @@ impl App {
                 if let Some(g) = self.self_guid {
                     keep.push(g);
                 }
-                if let Some(t) = self.targets.get(self.world.target_index).copied() {
+                if let Some(t) = self.world.target_guid {
                     keep.push(t);
                 }
                 if self.world.trade.partner != 0 {
@@ -3317,6 +3329,57 @@ mod tests {
         app.world.target_guid = Some(7); // no entity 7 in the map: it despawned
         app.refresh_targets();
         assert_eq!(app.current_target(), None, "a despawned target must clear");
+    }
+
+    /// Regression for "sometimes when I examine something the name of it
+    /// disappears": the examine path (appraise_current) resolved the target
+    /// by list index. When the targeted entity sits out of the 96-u radar
+    /// range (the 3D view still renders the whole landblock) the refresh
+    /// parks the index at 0, so examine either wiped the live target (the
+    /// name vanishing) or silently re-targeted the nearest in-range entity.
+    /// It must hold the guid.
+    #[test]
+    fn examine_holds_target_out_of_range() {
+        use acproto::codec::Vec3;
+        use crate::movement::Movement;
+        use crate::world::Entity;
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        let cell = 0x0001_0000u32;
+        app.movement = Some(Movement::new(cell, Vec3 { x: 0.0, y: 0.0, z: 0.0 }));
+        let ent = |guid: u32, x: f32| Entity {
+            guid,
+            name: None,
+            cell,
+            pos: Vec3 { x, y: 0.0, z: 0.0 },
+            rot: [1.0, 0.0, 0.0, 0.0],
+            is_player: true,
+            health: Some(100),
+            health_max: Some(100),
+            mana: None,
+            mana_max: None,
+            item_type: 0,
+            setup_id: None,
+            mtable_id: None,
+            model_parts: None,
+            motion_cmd: 0,
+            physics_state: 0,
+            is_vendor: false,
+            last_seen: Instant::now(),
+        };
+        // Target 7 is 150 u out (beyond RADAR_RANGE); entity 1 is 5 u in.
+        app.world.entities.insert(7, ent(7, 150.0));
+        app.world.entities.insert(1, ent(1, 5.0));
+        app.target_kind = 0;
+        app.world.target_guid = Some(7);
+        app.refresh_targets();
+        // The refresh parks target_index at 0 (entity 1 is nearest in range).
+        // Examine (appraise_current) must hold guid 7, not wipe it or retarget 1.
+        app.appraise_current();
+        assert_eq!(
+            app.current_target(),
+            Some(7),
+            "examine must hold the out-of-range target by guid, not the stale index"
+        );
     }
 
     fn character_error_packet(code: u32) -> Vec<u8> {

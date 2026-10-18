@@ -3510,6 +3510,7 @@ fn target_kind_for(app: &App, guid: u32) -> u8 {
 fn set_target_by_guid(app: &mut App, guid: u32) {
     app.target_kind = target_kind_for(app, guid);
     app.refresh_targets();
+    app.world.target_guid = Some(guid);
     match app.targets.iter().position(|&g| g == guid) {
         Some(i) => app.world.target_index = i,
         None => app.world.flash = Some("out of range".into()),
