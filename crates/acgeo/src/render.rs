@@ -953,7 +953,12 @@ fn resolve_pose(scene: &mut Scene, a: &Actor, anim_time: f64) -> Pose {
     let mut resolved: Option<(AnimRef, bool, bool)> = None;
     if let Some(mtable_id) = a.mtable_id {
         if let Some(mtable) = scene.get_motion_table(mtable_id) {
-            if let Some(rc) = resolve_cycle(mtable, a.style, a.motion_cmd) {
+            // The motion table's cycles are keyed by a nonzero style (e.g.
+            // the non-combat style). An actor style of 0 is "unspecified",
+            // so fall back to the table's default style or every cycle
+            // lookup misses and the actor renders its static setup pose.
+            let style = if a.style == 0 { mtable.default_style } else { a.style };
+            if let Some(rc) = resolve_cycle(mtable, style, a.motion_cmd) {
                 if let Some(ref_) = rc.anims.first() {
                     resolved = Some((*ref_, rc.mirror, rc.reverse));
                 }
