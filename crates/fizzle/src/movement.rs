@@ -125,6 +125,30 @@ impl Movement {
         }
     }
 
+    /// The dominant retail motion command the sim is currently in, for the 3D
+    /// self-actor's animation (the retail MCMD space). Walking outranks
+    /// strafing and turning (a curved "turn while moving" still plays the
+    /// walk); a lone turn or strafe falls through to its own command. Running
+    /// reuses the walk cycle (the motion table has no separate run).
+    #[must_use]
+    pub fn motion_cmd(&self) -> u32 {
+        let s = &self.last_sig;
+        if s.forward != command::READY {
+            return if s.forward == command::RUN_FORWARD {
+                command::WALK_FORWARD
+            } else {
+                s.forward
+            };
+        }
+        if s.sidestep != command::READY {
+            return s.sidestep;
+        }
+        if s.turn != command::READY {
+            return s.turn;
+        }
+        command::READY
+    }
+
     fn forward_vec(&self) -> (f32, f32) {
         (self.heading.sin(), self.heading.cos())
     }
@@ -369,5 +393,58 @@ impl Movement {
         }
         self.cell = cell;
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HeldKeys, Movement, MoveAction, TICK};
+    use acproto::codec::Vec3;
+    use acproto::motion::command;
+    use std::time::Instant;
+
+    fn mv() -> Movement {
+        Movement::new(0, Vec3 { x: 0.0, y: 0.0, z: 0.0 })
+    }
+
+    fn drive(m: &mut Movement, held: HeldKeys, walking: bool) -> Vec<MoveAction> {
+        let mut h = held;
+        m.tick(TICK, &mut h, walking, Instant::now(), None)
+    }
+
+    #[test]
+    fn motion_cmd_walks_forward() {
+        let mut m = mv();
+        drive(&mut m, HeldKeys { forward: true, ..Default::default() }, true);
+        assert_eq!(m.motion_cmd(), command::WALK_FORWARD);
+    }
+
+    #[test]
+    fn motion_cmd_run_maps_to_walk_forward() {
+        let mut m = mv();
+        // The signature records RUN_FORWARD, but the animation command is WALK_FORWARD.
+        drive(&mut m, HeldKeys { forward: true, ..Default::default() }, false);
+        assert_eq!(m.motion_cmd(), command::WALK_FORWARD);
+    }
+
+    #[test]
+    fn motion_cmd_turns_right() {
+        let mut m = mv();
+        drive(&mut m, HeldKeys { turn_right: true, ..Default::default() }, true);
+        assert_eq!(m.motion_cmd(), command::TURN_RIGHT);
+    }
+
+    #[test]
+    fn motion_cmd_prefers_forward_over_turn() {
+        let mut m = mv();
+        drive(&mut m, HeldKeys { forward: true, turn_right: true, ..Default::default() }, true);
+        assert_eq!(m.motion_cmd(), command::WALK_FORWARD);
+    }
+
+    #[test]
+    fn motion_cmd_idle_is_ready() {
+        let mut m = mv();
+        drive(&mut m, HeldKeys::default(), true);
+        assert_eq!(m.motion_cmd(), command::READY);
     }
 }

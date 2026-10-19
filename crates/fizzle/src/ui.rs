@@ -65,9 +65,10 @@ const INV_GRID_R0: u16 = 6;
 const VENDOR_LIST_PAGE: usize = 8;
 /// A double-click: a second click on the same cell within this window.
 const DOUBLE_CLICK: Duration = Duration::from_millis(450);
-/// How far (screen cells) a 3D click may sit from a projected anchor and
-/// still count as a hit.
-const PICK_RADIUS: f32 = 3.0;
+/// How far (screen cells) a 3D click may sit from the edge of a projected
+/// body box and still count as a hit (a near body is easy to click; a thin
+/// far one only on its own dot).
+const PICK_PAD: f32 = 1.0;
 /// The merchant "key" item-type flag (a dropped key is used, not stored).
 const ITEM_TYPE_KEY: u32 = 0x4000;
 /// Ground item (corpse / dropped container) item type.
@@ -866,7 +867,11 @@ fn build_actors(app: &App) -> Vec<Actor> {
                 mtable_id: e.mtable_id,
                 setup_id: e.setup_id,
                 model_parts: e.model_parts.clone(),
-                motion_cmd: e.motion_cmd,
+                motion_cmd: app
+                    .movement
+                    .as_ref()
+                    .map(|m| m.motion_cmd())
+                    .unwrap_or(e.motion_cmd),
                 style: 0,
                 glow: Some(GLOW_SELF),
                 scale: ACTOR_SCALE,
@@ -917,13 +922,7 @@ fn reticle_target(app: &App) -> Option<ReticleTarget> {
     }
     let guid = app.current_target()?;
     let e = app.world.entities.get(&guid)?;
-    let (r, half_h) = if e.item_type == ITEM_TYPE_DOOR {
-        (1.3, 2.0) // a door slab
-    } else if e.item_type == ITEM_TYPE_GROUND || e.item_type == ITEM_TYPE_CONTAINER {
-        (0.7, 0.7) // a ground item / container
-    } else {
-        (0.9, 1.4) // a humanoid
-    };
+    let (r, half_h) = entity_half_extents(e);
     Some(ReticleTarget {
         x: e.pos.x,
         y: e.pos.y,
@@ -3392,8 +3391,9 @@ fn camera_basis(cam: &Camera, cols: usize, rows: usize, back: f32) -> Basis {
 }
 
 /// Project a world point into the pane (screen cell), `None` behind the
-/// near plane.
-fn project(b: &Basis, px: f32, py: f32, pz: f32) -> Option<(f32, f32)> {
+/// near plane. Returns `(sx, sy, zc)` with `zc` the forward depth (the
+/// distance along the view ray the renderer depth-tests with).
+fn project(b: &Basis, px: f32, py: f32, pz: f32) -> Option<(f32, f32, f32)> {
     let (vx, vy, vz) = (px - b.cam[0], py - b.cam[1], pz - b.cam[2]);
     let zc = vx * b.f[0] + vy * b.f[1] + vz * b.f[2];
     if zc < CAM_NEAR {
@@ -3403,6 +3403,7 @@ fn project(b: &Basis, px: f32, py: f32, pz: f32) -> Option<(f32, f32)> {
     Some((
         b.sc[0] + (vx * b.r[0] + vy * b.r[1]) * s,
         b.sc[1] - (vx * b.u[0] + vy * b.u[1] + vz * b.u[2]) * s,
+        zc,
     ))
 }
 
@@ -3417,8 +3418,22 @@ fn anchor_height(e: &Entity) -> f32 {
     }
 }
 
-/// The nearest pickable entity projected within PICK_RADIUS of the cell
-/// (3D view only).
+/// The approximate half-extents (radius, half-height) of an entity's body,
+/// shared by the reticle and the 3D pick.
+fn entity_half_extents(e: &Entity) -> (f32, f32) {
+    if e.item_type == ITEM_TYPE_DOOR {
+        (1.3, 2.0) // a door slab
+    } else if e.item_type == ITEM_TYPE_GROUND || e.item_type == ITEM_TYPE_CONTAINER {
+        (0.7, 0.7) // a ground item / container
+    } else {
+        (0.9, 1.4) // a humanoid
+    }
+}
+
+/// The pickable 3D entity under the cell: the nearest one whose projected
+/// body box covers the click (3D view only). A near body is a large box, easy
+/// to hit; a thin far body is a tiny box, hit only when aimed at its dot — so
+/// a click near the vanishing point no longer grabs something far off.
 fn pick_world3d(app: &App, lb: WLayout, r: u16, c: u16) -> Option<u32> {
     if r < lb.world_y0 + 1 || r > lb.world_y1 - 2 || c < 1 || c > lb.left_w - 2 {
         return None;
@@ -3447,6 +3462,7 @@ fn pick_world3d(app: &App, lb: WLayout, r: u16, c: u16) -> Option<u32> {
     let px = (c - 1) as f32;
     let py = (r - lb.world_y0 - 1) as f32;
     let w3d = app.world3d.as_ref();
+    // (guid, depth) of the nearest body box that covers the click.
     let mut best: Option<(u32, f32)> = None;
     for e in app.world.entities.values() {
         if Some(e.guid) == app.self_guid {
@@ -3459,28 +3475,58 @@ fn pick_world3d(app: &App, lb: WLayout, r: u16, c: u16) -> Option<u32> {
         if !pickable {
             continue;
         }
-        let (wx, wy, wz) = (
-            wrap_block_coord(e.pos.x),
-            wrap_block_coord(e.pos.y),
-            e.pos.z + anchor_height(e),
-        );
-        let Some((sx, sy)) = project(&basis, wx, wy, wz) else {
-            continue;
-        };
-        let d = (sx - px).hypot(sy - py);
-        if d <= PICK_RADIUS {
-            // Line of sight: an entity hidden behind terrain, a wall, or a
-            // closed door from the camera can't be clicked. Occluded entities
-            // are skipped, so a nearer visible one still wins.
-            if let Some(w) = w3d {
-                if !w.line_of_sight(basis.cam, [wx, wy, wz]) {
-                    continue;
+        let (r_h, half_h) = entity_half_extents(e);
+        let ax = wrap_block_coord(e.pos.x);
+        let ay = wrap_block_coord(e.pos.y);
+        let z0 = e.pos.z;
+        let z1 = e.pos.z + 2.0 * half_h;
+        let mut minx = f32::INFINITY;
+        let mut miny = f32::INFINITY;
+        let mut maxx = f32::NEG_INFINITY;
+        let mut maxy = f32::NEG_INFINITY;
+        // Project the body box's 8 corners into an axis-aligned screen box
+        // (the render wraps the actor origin, not its local vertices, so the
+        // corners are the wrapped origin plus an unwrapped offset).
+        for (cx, cy) in [
+            (ax - r_h, ay - r_h),
+            (ax + r_h, ay - r_h),
+            (ax - r_h, ay + r_h),
+            (ax + r_h, ay + r_h),
+        ] {
+            for cz in [z0, z1] {
+                if let Some((sx, sy, _)) = project(&basis, cx, cy, cz) {
+                    minx = minx.min(sx);
+                    miny = miny.min(sy);
+                    maxx = maxx.max(sx);
+                    maxy = maxy.max(sy);
                 }
             }
-            match best {
-                Some((_, bd)) if bd <= d => {}
-                _ => best = Some((e.guid, d)),
+        }
+        if minx.is_infinite() {
+            continue; // entirely behind the near plane
+        }
+        if px + PICK_PAD < minx
+            || px - PICK_PAD > maxx
+            || py + PICK_PAD < miny
+            || py - PICK_PAD > maxy
+        {
+            continue; // the click isn't on this body
+        }
+        let (wx, wy, wz) = (ax, ay, e.pos.z + anchor_height(e));
+        let Some((_, _, zc)) = project(&basis, wx, wy, wz) else {
+            continue;
+        };
+        // Line of sight: an entity hidden behind terrain, a wall, or a closed
+        // door from the camera can't be clicked. Occluded ones are skipped so
+        // a nearer visible one still wins.
+        if let Some(w) = w3d {
+            if !w.line_of_sight(basis.cam, [wx, wy, wz]) {
+                continue;
             }
+        }
+        match best {
+            Some((_, bd)) if bd <= zc => {}
+            _ => best = Some((e.guid, zc)),
         }
     }
     best.map(|(g, _d)| g)
