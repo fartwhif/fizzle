@@ -857,13 +857,19 @@ fn build_actors(app: &App) -> Vec<Actor> {
     let self_heading = app.movement.as_ref().map(|m| m.heading).unwrap_or(0.0);
     for e in app.world.entities.values() {
         if Some(e.guid) == app.self_guid {
+            // The sim heading h means "moved h toward +X from +Y" (the camera
+            // and forward_vec use this convention). A rotation of +h about
+            // the vertical axis turns the model's authored forward (0,1,0) to
+            // (-sin h, cos h) — the mirror of the movement direction, so the
+            // pose drifts 2h off the facing as the player turns. The correct
+            // vertical rotation is therefore -h (ACE yaw: +h is +Z -> +X).
             let half = self_heading / 2.0;
             actors.push(Actor {
                 guid: e.guid,
                 x: self_pos.x,
                 y: self_pos.y,
                 z: self_pos.z,
-                quat: [half.cos(), 0.0, 0.0, half.sin()],
+                quat: [half.cos(), 0.0, 0.0, -half.sin()],
                 mtable_id: e.mtable_id,
                 setup_id: e.setup_id,
                 model_parts: e.model_parts.clone(),

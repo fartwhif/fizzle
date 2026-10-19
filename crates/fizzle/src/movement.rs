@@ -114,14 +114,16 @@ impl Movement {
         }
     }
 
-    /// The current world position (block-local) + facing quaternion.
+    /// The current world position (block-local) + facing quaternion. The
+    /// vertical rotation is -heading (ACE yaw: a heading of h is a rotation of
+    /// -h about the vertical axis; +h is +Z -> +X, matching `forward_vec`).
     #[must_use]
     pub fn current_position(&self) -> Position {
         let half = self.heading / 2.0;
         Position {
             cell: self.cell,
             pos: self.pos,
-            rot: Quat { w: half.cos(), x: 0.0, y: 0.0, z: half.sin() },
+            rot: Quat { w: half.cos(), x: 0.0, y: 0.0, z: -half.sin() },
         }
     }
 
