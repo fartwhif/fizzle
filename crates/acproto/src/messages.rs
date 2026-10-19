@@ -3603,13 +3603,10 @@ pub(crate) fn cmd_from_u16(v: u32) -> u32 {
         0x000f => 0x6500_000f, // SideStepRight
         0x0010 => 0x6500_0010, // SideStepLeft
         0 => 0,
-        _ => {
-            if v & 0xffff_0000 != 0 {
-                v
-            } else {
-                0
-            }
-        }
+        // Unmapped non-zero codes (combat Thrust/Slash/Attack/Aim/spell-cast,
+        // etc.) are passed through as their low-16 value; the motion table
+        // keys on motion_cmd & 0xfffff, so the low 16 bits are what resolve.
+        _ => v
     }
 }
 

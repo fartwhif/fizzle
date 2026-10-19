@@ -867,12 +867,22 @@ fn build_actors(app: &App) -> Vec<Actor> {
                 mtable_id: e.mtable_id,
                 setup_id: e.setup_id,
                 model_parts: e.model_parts.clone(),
-                motion_cmd: app
-                    .movement
-                    .as_ref()
-                    .map(|m| m.motion_cmd())
-                    .unwrap_or(e.motion_cmd),
-                style: 0,
+                motion_cmd: {
+                    // The server's motion command wins when it is a
+                    // non-locomotion command (attack/cast/etc., low-20 bits
+                    // > 16); otherwise the movement sim's locomotion command
+                    // (walk/run/idle) is used.
+                    let server_cmd = e.motion_cmd;
+                    if server_cmd != 0 && (server_cmd & 0xfffff) > 16 {
+                        server_cmd
+                    } else {
+                        app.movement
+                            .as_ref()
+                            .map(|m| m.motion_cmd())
+                            .unwrap_or(server_cmd)
+                    }
+                },
+                style: e.style,
                 glow: Some(GLOW_SELF),
                 scale: ACTOR_SCALE,
             });
@@ -903,7 +913,11 @@ fn build_actors(app: &App) -> Vec<Actor> {
             setup_id: e.setup_id,
             model_parts: e.model_parts.clone(),
             motion_cmd: if e.is_player { e.motion_cmd } else { MCMD_READY },
-            style: if e.is_player { 0 } else { STYLE_CREATURE },
+            style: if e.style != 0 || e.is_player {
+                e.style
+            } else {
+                STYLE_CREATURE
+            },
             glow,
             // Humanoid bodies (players/creatures) render at the scaled-up
             // height; objects (ground items/doors/containers) stay 1.0.

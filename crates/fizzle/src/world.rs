@@ -104,6 +104,10 @@ pub struct Entity {
     pub mtable_id: Option<u32>,
     pub model_parts: Option<Vec<(usize, u32)>>,
     pub motion_cmd: u32,
+    /// Motion stance low-16 (e.g. NonCombat `0x003d`, SwordCombat `0x003e`),
+    /// from the server's S2C Motion. `0` = unspecified (the renderer falls
+    /// back to the motion table's default style, i.e. NonCombat/peace).
+    pub style: u32,
     pub physics_state: u32,
     pub is_vendor: bool,
     /// Last time this entity was seen (for the far-cull pass).
@@ -497,6 +501,7 @@ impl World {
             mtable_id: None,
             model_parts: None,
             motion_cmd: 0,
+            style: 0,
             physics_state: 0,
             is_vendor: false,
             last_seen: Instant::now(),

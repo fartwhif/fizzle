@@ -812,16 +812,37 @@ impl App {
             }
             Incoming::VectorUpdate(_) => {}
             Incoming::Motion(m) => {
-                // Door On/Off arrives in the retail motion command list
-                // (DoorOn 0x4000000b / DoorOff 0x4000000c). Non-door motion is
-                // otherwise unused (positions come from UpdatePosition).
-                let (is_door, cur) = match self.world.entities.get(&m.guid) {
-                    Some(e) if e.is_door() => (true, e.door_open()),
-                    _ => (false, false),
-                };
+                // The S2C Motion carries the stance (style) and the motion
+                // commands (forward/sidestep/turn + command list). For
+                // players/creatures this drives the 3D pose (peace vs combat
+                // stance, attacks, casts). For doors, the open/close rides the
+                // forward command (DoorOn 0x4000000b / DoorOff 0x4000000c).
+                let is_door = self
+                    .world
+                    .entities
+                    .get(&m.guid)
+                    .is_some_and(|e| e.is_door());
                 if !is_door {
+                    // Update the entity's stance + motion from the server. The
+                    // stance (style) switches the motion table to the combat
+                    // cycles; the motion command is the newest command (last
+                    // command-list entry, e.g. an active attack/cast, else the
+                    // forward command).
+                    if let Some(ent) = self.world.entities.get_mut(&m.guid) {
+                        if m.style != 0 {
+                            ent.style = m.style as u32;
+                        }
+                        if let Some(c) = m.commands.last().copied().filter(|c| *c != 0) {
+                            ent.motion_cmd = c;
+                        }
+                    }
                     return;
                 }
+                let cur = self
+                    .world
+                    .entities
+                    .get(&m.guid)
+                    .is_some_and(|e| e.door_open());
                 let open = if m.commands.contains(&crate::world::DOOR_MOTION_ON) {
                     true
                 } else if m.commands.contains(&crate::world::DOOR_MOTION_OFF) {
@@ -3289,6 +3310,7 @@ mod tests {
             mtable_id: None,
             model_parts: None,
             motion_cmd: 0,
+            style: 0,
             physics_state: 0,
             is_vendor: false,
             last_seen: Instant::now(),
@@ -3343,6 +3365,7 @@ mod tests {
             mtable_id: None,
             model_parts: None,
             motion_cmd: 0,
+            style: 0,
             physics_state: 0,
             is_vendor: false,
             last_seen: Instant::now(),
@@ -3406,6 +3429,7 @@ mod tests {
             mtable_id: None,
             model_parts: None,
             motion_cmd: 0,
+            style: 0,
             physics_state: 0,
             is_vendor: false,
             last_seen: Instant::now(),
