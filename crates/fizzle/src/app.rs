@@ -731,18 +731,25 @@ impl App {
                 // closed door blocks the movement sim, an open one does not.
                 if o.item_type == crate::world::ITEM_TYPE_DOOR {
                     if let Some(w) = self.world3d.as_mut() {
-                        let aabb = o
-                            .setup_id
-                            .and_then(|s| w.setup_aabb(s))
-                            .and_then(|m| {
-                                position.map(|p| {
-                                    transform_aabb(
-                                        m,
-                                        [p.pos.x, p.pos.y, p.pos.z],
-                                        [p.rot.w, p.rot.x, p.rot.y, p.rot.z],
-                                    )
-                                })
-                            });
+                        let model_aabb = o.setup_id.and_then(|s| w.setup_aabb(s));
+                        let aabb = model_aabb.and_then(|m| {
+                            position.map(|p| {
+                                let mut aabb = transform_aabb(
+                                    m,
+                                    [p.pos.x, p.pos.y, p.pos.z],
+                                    [p.rot.w, p.rot.x, p.rot.y, p.rot.z],
+                                );
+                                // Ground the slab: the setup model's local frame
+                                // does not put its base at the origin, so the
+                                // world box's z-min sits below the door's world
+                                // z (the ground). Shift it up so the base rests
+                                // on the ground rather than sinking in.
+                                let dz = p.pos.z - aabb[2];
+                                aabb[2] += dz;
+                                aabb[5] += dz;
+                                aabb
+                            })
+                        });
                         let open = o.motion_cmd == crate::world::DOOR_MOTION_ON
                             || (o.physics_state & crate::world::PHYSICS_ETHEREAL) != 0;
                         w.set_door(o.guid, aabb, open);
@@ -842,7 +849,15 @@ impl App {
                         });
                     let aabb = setup
                         .and_then(|s| w.setup_aabb(s))
-                        .map(|m| transform_aabb(m, origin, rot));
+                        .map(|m| {
+                            let mut aabb = transform_aabb(m, origin, rot);
+                            // Ground the slab on the door's world z (the ObjectCreate
+                            // and Motion paths must agree).
+                            let dz = origin[2] - aabb[2];
+                            aabb[2] += dz;
+                            aabb[5] += dz;
+                            aabb
+                        });
                     w.set_door(m.guid, aabb, open);
                 }
             }

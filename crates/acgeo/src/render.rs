@@ -72,6 +72,27 @@ const STATIC_COLOR: (f32, f32, f32) = (150.0, 132.0, 110.0);
 const DOOR_CLOSED: (f32, f32, f32) = (132.0, 90.0, 52.0);
 const DOOR_OPEN: (f32, f32, f32) = (92.0, 78.0, 62.0);
 
+/// How long (seconds) a door takes to swing fully open or closed.
+const DOOR_SWING_SECS: f64 = 0.55;
+/// The door's fully-open swing, in radians (~105°, just past 90° so the slab
+/// clears the frame).
+const DOOR_OPEN_ANGLE: f32 = 105.0 * std::f32::consts::PI / 180.0;
+
+/// A door's collision slab plus its open animation state. The slab (`aabb`)
+/// is the closed, grounded box; the door swings about its back-left vertical
+/// edge as `open` (0 = closed, 1 = fully open) eases toward `goal`.
+#[derive(Clone, Copy, Debug)]
+pub struct Door {
+    /// The closed-door slab in world space.
+    pub aabb: Aabb,
+    /// The current swing (0 = closed, 1 = fully open).
+    pub open: f32,
+    /// The target swing (0 = closed, 1 = open).
+    pub goal: f32,
+    /// Last frame's `now` (seconds); negative = never rendered (no dt yet).
+    pub last_now: f64,
+}
+
 /// Motion commands (the TS's MCMD values from movement.ts).
 const MCMD_READY: u32 = 0x41000003;
 const MCMD_WALK_FORWARD: u32 = 0x45000005;
@@ -349,7 +370,7 @@ fn occlude_camera_back(
 pub(crate) fn segment_blocked(
     soup: Option<&[f32]>,
     statics: &[Solid],
-    doors: &HashMap<u32, (Aabb, bool)>,
+    doors: &HashMap<u32, Door>,
     from: [f32; 3],
     to: [f32; 3],
 ) -> bool {
@@ -389,10 +410,9 @@ pub(crate) fn segment_blocked(
             }
         }
     }
-    // Closed doors render as solid slabs, so they occlude the target too.
-    for v in doors.values() {
-        let (aabb, open) = v;
-        if !open && crate::collision::seg_box(from[0], from[1], from[2], dx, dy, dz, aabb) {
+    // A door occludes the target until it has mostly swung clear.
+    for d in doors.values() {
+        if d.open < 0.9 && crate::collision::seg_box(from[0], from[1], from[2], dx, dy, dz, &d.aabb) {
             return true;
         }
     }
@@ -591,33 +611,48 @@ fn raster_statics(
     }
 }
 
-/// Rasterize a door's collision slab as a box (outward-facing faces).
+/// Rasterize a door slab as a box that swings open about its back-left
+/// vertical edge: `Door.open` (0 = closed, 1 = fully open) drives the swing.
 fn raster_door_box(
     cells: &mut [[u8; 3]],
     depth: &mut [f32],
     b: &Basis,
-    cols: usize,
-    rows: usize,
-    aabb: &Aabb,
-    open: bool,
+    dims: (usize, usize),
+    door: &Door,
     light: (f32, f32, f32),
     fog_span: f32,
 ) {
-    let [x0, y0, z0, x1, y1, z1] = *aabb;
-    let color = if open { DOOR_OPEN } else { DOOR_CLOSED };
-    // 4 corners per face, CCW as seen from outside (outward normal).
-    let faces: [[(f32, f32, f32); 4]; 6] = [
-        [(x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)],
-        [(x0, y0, z0), (x0, y1, z0), (x1, y1, z0), (x1, y0, z0)],
-        [(x0, y1, z0), (x0, y1, z1), (x1, y1, z1), (x1, y1, z0)],
-        [(x1, y0, z0), (x1, y0, z1), (x0, y0, z1), (x0, y0, z0)],
-        [(x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z1)],
-        [(x0, y0, z0), (x0, y0, z1), (x0, y1, z1), (x0, y1, z0)],
+    let (cols, rows) = dims;
+    let [x0, y0, z0, x1, y1, z1] = door.aabb;
+    let color = if door.open > 0.5 { DOOR_OPEN } else { DOOR_CLOSED };
+    // The hinge: the back-left vertical edge at (x0, y0).
+    let (hx, hy) = (x0, y0);
+    let ang = door.open * DOOR_OPEN_ANGLE;
+    let (ca, sa) = (ang.cos(), ang.sin());
+    // The four bottom-ring corners (the top ring shares their swung x/y).
+    let base: [(f32, f32); 4] = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+    let mut rot = [(0.0f32, 0.0, 0.0); 8];
+    for (i, &(bx, by)) in base.iter().enumerate() {
+        let dx = bx - hx;
+        let dy = by - hy;
+        let rx = hx + dx * ca - dy * sa;
+        let ry = hy + dx * sa + dy * ca;
+        rot[i] = (rx, ry, z0);
+        rot[i + 4] = (rx, ry, z1);
+    }
+    // 4 corner indices per face, CCW as seen from outside (outward normal).
+    let faces: [[usize; 4]; 6] = [
+        [4, 5, 6, 7], // top
+        [0, 3, 2, 1], // bottom
+        [3, 7, 6, 2], // +y
+        [1, 5, 4, 0], // -y
+        [1, 2, 6, 5], // +x
+        [0, 4, 7, 3], // -x
     ];
     for face in faces {
-        let [v0, v1, v2, v3] = face;
-        raster_tri(cells, depth, b, cols, rows, v0, v1, v2, color, light, fog_span);
-        raster_tri(cells, depth, b, cols, rows, v0, v2, v3, color, light, fog_span);
+        let [i0, i1, i2, i3] = face;
+        raster_tri(cells, depth, b, cols, rows, rot[i0], rot[i1], rot[i2], color, light, fog_span);
+        raster_tri(cells, depth, b, cols, rows, rot[i0], rot[i2], rot[i3], color, light, fog_span);
     }
 }
 
@@ -1152,7 +1187,7 @@ pub fn render_frame(
     zoom: &mut Zoom,
     anim: &mut HashMap<u32, AnimClock>,
     statics: &[Solid],
-    doors: &HashMap<u32, (Aabb, bool)>,
+    doors: &mut HashMap<u32, Door>,
     lb: u32,
     cam: &Camera,
     actors: &[Actor],
@@ -1210,8 +1245,22 @@ pub fn render_frame(
     if !statics.is_empty() {
         raster_statics(&mut cells, &mut depth, &basis, cols, rows, statics, light, fog_span);
     }
-    for &(b, open) in doors.values() {
-        raster_door_box(&mut cells, &mut depth, &basis, cols, rows, &b, open, light, fog_span);
+    // Advance each door's swing toward its goal (frame-rate independent),
+    // then rasterize the swung slab.
+    for d in doors.values_mut() {
+        let dt = if d.last_now < 0.0 {
+            0.0
+        } else {
+            (now - d.last_now).max(0.0)
+        };
+        d.last_now = now;
+        let step = (dt / DOOR_SWING_SECS) as f32;
+        if d.open < d.goal {
+            d.open = (d.open + step).min(d.goal);
+        } else if d.open > d.goal {
+            d.open = (d.open - step).max(d.goal);
+        }
+        raster_door_box(&mut cells, &mut depth, &basis, (cols, rows), d, light, fog_span);
     }
     if let Some(d) = &dyn_soup {
         if !d.is_empty() {
@@ -1286,10 +1335,10 @@ mod tests {
         assert!(segment_blocked(Some(&soup), &[], &HashMap::new(), [10.0, 10.0, 8.0], [10.0, 10.0, 0.0]));
         // A closed-door slab (x 9..11, y 9..11, z 0..4) crossing the ray occludes.
         let mut doors = HashMap::new();
-        doors.insert(1u32, ([9.0, 9.0, 0.0, 11.0, 11.0, 4.0], false));
+        doors.insert(1u32, Door { aabb: [9.0, 9.0, 0.0, 11.0, 11.0, 4.0], open: 0.0, goal: 0.0, last_now: -1.0 });
         assert!(segment_blocked(None, &[], &doors, [10.0, 10.0, 8.0], [10.0, 10.0, 0.0]));
         // The same door opened: clear.
-        doors.insert(1u32, ([9.0, 9.0, 0.0, 11.0, 11.0, 4.0], true));
+        doors.insert(1u32, Door { aabb: [9.0, 9.0, 0.0, 11.0, 11.0, 4.0], open: 1.0, goal: 1.0, last_now: -1.0 });
         assert!(!segment_blocked(None, &[], &doors, [10.0, 10.0, 8.0], [10.0, 10.0, 0.0]));
     }
 
@@ -1303,7 +1352,7 @@ mod tests {
         let mut zoom = Zoom::new();
         let mut anim = HashMap::new();
         let statics = scene.solids_for_block(lb);
-        let doors = HashMap::new();
+        let mut doors = HashMap::new();
         let cam = Camera {
             x: 96.0,
             y: 96.0,
@@ -1353,7 +1402,7 @@ mod tests {
             &mut zoom,
             &mut anim,
             &statics,
-            &doors,
+            &mut doors,
             lb,
             &cam,
             &actors,
@@ -1382,7 +1431,7 @@ mod tests {
             &mut zoom,
             &mut anim,
             &statics,
-            &doors,
+            &mut doors,
             lb,
             &cam,
             &actors,
@@ -1427,7 +1476,7 @@ mod tests {
         };
         let lb = 0x3073u32;
         let statics = scene.solids_for_block(lb);
-        let doors = HashMap::new();
+        let mut doors = HashMap::new();
         let cam = Camera {
             x: 96.0,
             y: 96.0,
@@ -1443,7 +1492,7 @@ mod tests {
                 zoom,
                 &mut anim,
                 &statics,
-                &doors,
+                &mut doors,
                 lb,
                 &cam,
                 &[],
@@ -1490,7 +1539,7 @@ mod tests {
             &mut zoom,
             &mut anim,
             &[],
-            &HashMap::new(),
+            &mut HashMap::new(),
             0,
             &cam,
             &[],
@@ -1509,7 +1558,7 @@ mod tests {
                 &mut zoom,
                 &mut anim,
                 &[],
-                &HashMap::new(),
+                &mut HashMap::new(),
                 0,
                 &cam,
                 &[],

@@ -97,7 +97,7 @@ pub fn seg_box(
 #[must_use]
 pub fn blocked(
     statics: &[Solid],
-    doors: &HashMap<u32, (Aabb, bool)>,
+    doors: &HashMap<u32, crate::render::Door>,
     x0: f32,
     y0: f32,
     z0: f32,
@@ -114,7 +114,7 @@ pub fn blocked(
 /// One body-height ray against the periodic statics + the closed doors.
 fn ray_blocked(
     statics: &[Solid],
-    doors: &HashMap<u32, (Aabb, bool)>,
+    doors: &HashMap<u32, crate::render::Door>,
     ax: f32,
     ay: f32,
     az: f32,
@@ -157,11 +157,13 @@ fn ray_blocked(
             }
         }
     }
-    // Closed doors (same client frame as the player — no periodicity).
-    for &(b, open) in doors.values() {
-        if open {
+    // Closed doors (same client frame as the player — no periodicity). A
+    // door stops movement until it has mostly swung clear.
+    for d in doors.values() {
+        if d.open >= 0.9 {
             continue;
         }
+        let b = d.aabb;
         if ax.max(bx) < b[0] || ax.min(bx) > b[3] {
             continue;
         }
@@ -227,13 +229,13 @@ mod tests {
         let wall = wall_solid();
         let mut doors = HashMap::new();
         // A closed door slab the path must cross.
-        doors.insert(1, ([9.0, 18.0, 0.0, 11.0, 20.0, 4.0], false));
+        doors.insert(1, crate::render::Door { aabb: [9.0, 18.0, 0.0, 11.0, 20.0, 4.0], open: 0.0, goal: 0.0, last_now: -1.0 });
         // Crossing the wall (the knee ray at z+0.3 hits it).
         assert!(blocked(&[wall.clone()], &doors, 5.0, 10.0, 0.0, 15.0, 10.0, 0.0));
         // Crossing the closed door.
         assert!(blocked(&[], &doors, 5.0, 19.0, 0.0, 15.0, 19.0, 0.0));
         // The same path with the door open does not block.
-        doors.insert(1, ([9.0, 18.0, 0.0, 11.0, 20.0, 4.0], true));
+        doors.insert(1, crate::render::Door { aabb: [9.0, 18.0, 0.0, 11.0, 20.0, 4.0], open: 1.0, goal: 1.0, last_now: -1.0 });
         assert!(!blocked(&[], &doors, 5.0, 19.0, 0.0, 15.0, 19.0, 0.0));
         // A path that avoids everything: it crosses the wall plane at
         // y = 0.5, below the triangle's rising hypotenuse (z < y/4).

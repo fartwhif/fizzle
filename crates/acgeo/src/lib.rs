@@ -140,7 +140,7 @@ pub fn get_dereth_land(dat_dir: Option<&str>) -> Option<DerethLand> {
 /// probe query is "no info" and [`World3D::render`] returns `None`.
 pub struct World3D {
     scene: scene::Scene,
-    doors: std::collections::HashMap<u32, (Aabb, bool)>,
+    doors: std::collections::HashMap<u32, render::Door>,
     cur_lb: u32,
     statics: Vec<Solid>,
     zoom: render::Zoom,
@@ -211,10 +211,19 @@ impl World3D {
         self.statics = self.scene.solids_for_block(lb);
     }
 
-    /// Add/update a closed-door collision slab (`None` aabb drops it).
+    /// Add/update a door collision slab (`None` aabb drops it). `open` sets
+    /// the swing's goal; any in-flight swing is preserved so the door eases
+    /// to the new state rather than snapping.
     pub fn set_door(&mut self, guid: u32, aabb: Option<Aabb>, open: bool) {
         match aabb {
-            Some(b) => { self.doors.insert(guid, (b, open)); }
+            Some(b) => {
+                let goal = if open { 1.0 } else { 0.0 };
+                let open_cur = self.doors.get(&guid).map(|d| d.open).unwrap_or(0.0);
+                self.doors.insert(
+                    guid,
+                    render::Door { aabb: b, open: open_cur, goal, last_now: -1.0 },
+                );
+            }
             None => { self.doors.remove(&guid); }
         }
     }
@@ -252,7 +261,7 @@ impl World3D {
             &mut self.zoom,
             &mut self.anim,
             &self.statics,
-            &self.doors,
+            &mut self.doors,
             lb,
             cam,
             actors,
