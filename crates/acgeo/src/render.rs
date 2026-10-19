@@ -1093,12 +1093,21 @@ fn build_dynamic_soup(
 
             let pf = pose.part_frames.get(pi).copied().unwrap_or(IDENTITY);
             let (q, t) = acegeom::compose3(&obj, &pose.pos_frame, &pf);
-            // Bring the humanoid model's feet to the actor's z (the ground):
-            // the mesh's rest pose floats ~0.47 u below its origin, and the
-            // scale amplifies that offset. Objects (scale 1.0) sit at their
-            // natural position. The glow/reticle/pick all treat the actor's z
-            // as the feet, so the body must sit there too.
-            let mut t = t;
+            // Uniform model scale: scale the part's model-space anchor
+            // position about the actor's world position (obj) by the same
+            // factor as the vertices. This keeps the parts in their natural
+            // proportions instead of each inflating about its own center.
+            // Objects (scale 1.0) are left at their natural position.
+            let mut t = if a.scale != 1.0 {
+                [
+                    obj.ox + a.scale * (t[0] - obj.ox),
+                    obj.oy + a.scale * (t[1] - obj.oy),
+                    obj.oz + a.scale * (t[2] - obj.oz),
+                ]
+            } else {
+                t
+            };
+            // Bring the humanoid model's feet to the actor's z (the ground).
             if a.scale != 1.0 {
                 t[2] += ACTOR_GROUND_LIFT;
             }
