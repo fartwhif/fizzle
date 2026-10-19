@@ -339,6 +339,66 @@ fn occlude_camera_back(
     }
 }
 
+/// Whether the open segment `from` → `to` (both in the block-local frame the
+/// renderer uses) is crossed by the block's terrain soup, static geometry, or
+/// a closed-door slab — i.e. the camera at `from` cannot see the point `to`.
+/// `tri_t` (unit ray, distance) tests the triangle meshes; a hit strictly
+/// in front of `to` (with a small margin so `to`'s own coincident surface
+/// doesn't count) occludes. Closed doors use the segment-vs-AABB test.
+#[must_use]
+pub(crate) fn segment_blocked(
+    soup: Option<&[f32]>,
+    statics: &[Solid],
+    doors: &HashMap<u32, (Aabb, bool)>,
+    from: [f32; 3],
+    to: [f32; 3],
+) -> bool {
+    let (dx, dy, dz) = (to[0] - from[0], to[1] - from[1], to[2] - from[2]);
+    let l = (dx * dx + dy * dy + dz * dz).sqrt();
+    if l < 1e-6 {
+        return false;
+    }
+    let (ux, uy, uz) = (dx / l, dy / l, dz / l);
+    let cutoff = l - 0.05;
+    if let Some(soup) = soup {
+        let n = soup.len() / 12 * 12;
+        for t in (0..n).step_by(12) {
+            let tt = tri_t(
+                from[0], from[1], from[2], ux, uy, uz,
+                (soup[t], soup[t + 1], soup[t + 2]),
+                (soup[t + 3], soup[t + 4], soup[t + 5]),
+                (soup[t + 6], soup[t + 7], soup[t + 8]),
+            );
+            if tt > 0.0 && tt < cutoff {
+                return true;
+            }
+        }
+    }
+    for s in statics {
+        let tris = &s.tris;
+        let n = tris.len() / 9 * 9;
+        for i in (0..n).step_by(9) {
+            let tt = tri_t(
+                from[0], from[1], from[2], ux, uy, uz,
+                (tris[i], tris[i + 1], tris[i + 2]),
+                (tris[i + 3], tris[i + 4], tris[i + 5]),
+                (tris[i + 6], tris[i + 7], tris[i + 8]),
+            );
+            if tt > 0.0 && tt < cutoff {
+                return true;
+            }
+        }
+    }
+    // Closed doors render as solid slabs, so they occlude the target too.
+    for v in doors.values() {
+        let (aabb, open) = v;
+        if !open && crate::collision::seg_box(from[0], from[1], from[2], dx, dy, dz, aabb) {
+            return true;
+        }
+    }
+    false
+}
+
 /// One smoothing step: move `zoom.back` toward `target` with the 1/e time
 /// constant ZOOM_TAU, at time `now` (seconds). The first call jumps straight
 /// to the target; a non-positive dt holds.
@@ -1177,6 +1237,46 @@ mod tests {
             return None;
         }
         Some(Scene::new(None))
+    }
+
+    /// A vertical wall triangle at x = 10, spanning y 0..20 and z 0..5
+    /// (covers z 0..2.5 at y = 10).
+    fn wall_solid() -> Solid {
+        Solid {
+            tris: vec![10.0, 0.0, 0.0, 10.0, 20.0, 0.0, 10.0, 20.0, 5.0],
+            bbox: [10.0, 0.0, 0.0, 10.0, 20.0, 5.0],
+        }
+    }
+
+    #[test]
+    fn segment_blocked_by_static_and_clear() {
+        let doors = HashMap::new();
+        let walls = [wall_solid()];
+        // Camera (5,10,1) → target (15,10,1): crosses the wall at x = 10,
+        // where the triangle covers z 0..2.5 (z = 1 is inside).
+        assert!(segment_blocked(None, &walls, &doors, [5.0, 10.0, 1.0], [15.0, 10.0, 1.0]));
+        // Same ray higher up (z = 3 > 2.5 at y = 10): clear of the wall.
+        assert!(!segment_blocked(None, &walls, &doors, [5.0, 10.0, 3.0], [15.0, 10.0, 3.0]));
+        // No geometry at all: clear.
+        assert!(!segment_blocked(None, &[], &doors, [5.0, 10.0, 1.0], [15.0, 10.0, 1.0]));
+        // Degenerate (zero-length) segment: clear.
+        assert!(!segment_blocked(None, &walls, &doors, [5.0, 10.0, 1.0], [5.0, 10.0, 1.0]));
+    }
+
+    #[test]
+    fn segment_blocked_by_soup_and_door() {
+        // A soup triangle in the z = 4 plane (12 floats: 3 verts + rgb) that
+        // covers the downward ray at (x, y) = (10, 10).
+        let soup = vec![0.0, 0.0, 4.0, 20.0, 0.0, 4.0, 10.0, 20.0, 4.0, 0.0, 0.0, 0.0];
+        // Camera above (z = 8) → target below (z = 0): crosses the plane at z = 4.
+        assert!(segment_blocked(Some(&soup), &[], &HashMap::new(), [10.0, 10.0, 8.0], [10.0, 10.0, 0.0]));
+        // A closed-door slab (x 9..11, y 9..11, z 0..4) crossing the ray occludes.
+        let mut doors = HashMap::new();
+        doors.insert(1u32, ([9.0, 9.0, 0.0, 11.0, 11.0, 4.0], false));
+        assert!(segment_blocked(None, &[], &doors, [10.0, 10.0, 8.0], [10.0, 10.0, 0.0]));
+        // The same door opened: clear.
+        doors.insert(1u32, ([9.0, 9.0, 0.0, 11.0, 11.0, 4.0], true));
+        assert!(!segment_blocked(None, &[], &doors, [10.0, 10.0, 8.0], [10.0, 10.0, 0.0]));
     }
 
     #[test]

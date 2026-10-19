@@ -3446,6 +3446,7 @@ fn pick_world3d(app: &App, lb: WLayout, r: u16, c: u16) -> Option<u32> {
     let basis = camera_basis(&cam, cols, rows, back);
     let px = (c - 1) as f32;
     let py = (r - lb.world_y0 - 1) as f32;
+    let w3d = app.world3d.as_ref();
     let mut best: Option<(u32, f32)> = None;
     for e in app.world.entities.values() {
         if Some(e.guid) == app.self_guid {
@@ -3458,16 +3459,24 @@ fn pick_world3d(app: &App, lb: WLayout, r: u16, c: u16) -> Option<u32> {
         if !pickable {
             continue;
         }
-        let Some((sx, sy)) = project(
-            &basis,
+        let (wx, wy, wz) = (
             wrap_block_coord(e.pos.x),
             wrap_block_coord(e.pos.y),
             e.pos.z + anchor_height(e),
-        ) else {
+        );
+        let Some((sx, sy)) = project(&basis, wx, wy, wz) else {
             continue;
         };
         let d = (sx - px).hypot(sy - py);
         if d <= PICK_RADIUS {
+            // Line of sight: an entity hidden behind terrain, a wall, or a
+            // closed door from the camera can't be clicked. Occluded entities
+            // are skipped, so a nearer visible one still wins.
+            if let Some(w) = w3d {
+                if !w.line_of_sight(basis.cam, [wx, wy, wz]) {
+                    continue;
+                }
+            }
             match best {
                 Some((_, bd)) if bd <= d => {}
                 _ => best = Some((e.guid, d)),

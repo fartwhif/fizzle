@@ -186,6 +186,22 @@ impl World3D {
         self.zoom.back()
     }
 
+    /// Whether the camera at `from` has line of sight to the point `to` (both
+    /// in the block-local frame the renderer uses): the straight segment
+    /// between them is clear of the current landblock's terrain, static
+    /// geometry, and closed doors. Gates click-picking so an occluded entity
+    /// can't be targeted.
+    #[must_use]
+    pub fn line_of_sight(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+        !render::segment_blocked(
+            self.scene.block_soup(self.cur_lb),
+            &self.statics,
+            &self.doors,
+            from,
+            to,
+        )
+    }
+
     /// Re-base the static solid geometry on a landblock (no-op when unchanged).
     pub fn set_landblock(&mut self, lb: u32) {
         if lb == self.cur_lb {
