@@ -577,11 +577,26 @@ impl World {
         }
         let x = &mut self.examine;
         x.guid = a.guid;
-        x.item_type = self.entities.get(&a.guid).map(|e| e.item_type).unwrap_or(0);
+        x.item_type = self
+            .entities
+            .get(&a.guid)
+            .map(|e| e.item_type)
+            .or_else(|| {
+                self.inventory
+                    .pack
+                    .iter()
+                    .chain(self.inventory.equipped.iter())
+                    .find(|i| i.guid == a.guid)
+                    .map(|i| i.item_type)
+            })
+            .or_else(|| self.vendor.items.iter().find(|i| i.guid == a.guid).map(|i| i.item_type))
+            .or_else(|| self.container.items.iter().find(|i| i.guid == a.guid).map(|i| i.item_type))
+            .unwrap_or(0);
         // The name must never be blank: the Appraise carries no name, so it
         // comes from the entity map. If the entity is absent at Appraise
-        // time (e.g. the pack-item ObjectCreate is still in flight), fall
-        // back to the inventory's own copy, then to the guid.
+        // time (a pack/vendor/loot item whose ObjectCreate is still in
+        // flight), fall back to the fizzle-side copy in the main pack,
+        // equipped, vendor shop, or open container, then to the guid.
         x.name = self
             .entities
             .get(&a.guid)
@@ -594,6 +609,8 @@ impl World {
                     .find(|i| i.guid == a.guid)
                     .map(|i| i.name.clone())
             })
+            .or_else(|| self.vendor.items.iter().find(|i| i.guid == a.guid).map(|i| i.name.clone()))
+            .or_else(|| self.container.items.iter().find(|i| i.guid == a.guid).map(|i| i.name.clone()))
             .unwrap_or_else(|| format!("#{}", a.guid));
         x.description = a.description.clone();
         x.level = a.level.unwrap_or(0);
