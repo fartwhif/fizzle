@@ -17,7 +17,7 @@
 use std::time::{Duration, Instant};
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
@@ -339,13 +339,22 @@ pub fn mouse(app: &mut App, area: Rect, ev: &crossterm::event::MouseEvent) {
     use crossterm::event::{MouseEventKind, MouseButton};
     // Always track the pointer (the marker is drawn every frame).
     app.mouse_xy = Some((ev.row, ev.column));
+    let (r, c) = (ev.row, ev.column);
+    // The character list is a menu of options: a single click moves the
+    // selection, a double click enters the world (the same convention as the
+    // in-world Esc menu's list rows).
+    if app.phase == Phase::CharSelect {
+        if let MouseEventKind::Down(MouseButton::Left) = ev.kind {
+            charselect_press(app, area, r, c);
+        }
+        return;
+    }
     if app.phase != Phase::InWorld {
         return;
     }
     if app.world.dead {
         return;
     }
-    let (r, c) = (ev.row, ev.column);
     if let Some(view) = app.menu_view {
         // The menu subviews replace the world panes: a single click moves the
         // selection, a double click activates (exactly the Enter branches),
@@ -4042,6 +4051,44 @@ fn view_press(app: &mut App, view: MenuView, r: u16, c: u16, h: u16, w: u16) {
     app.last_click_at = None;
 }
 
+/// A click on the character-select list (the "list row" convention shared
+/// with the in-world Esc menu): a single click moves the selection to the
+/// row under the pointer, a double click enters the world as that character
+/// (exactly the keyboard Enter branch).
+fn charselect_press(app: &mut App, area: Rect, r: u16, c: u16) {
+    // Mirror draw_charselect's layout: the list is the top chunk, the hint
+    // the bottom 3 rows; only the list's inner rows (inside the border) map
+    // to characters, and the list does not scroll (row 0 is the first item).
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(4), Constraint::Length(3)])
+        .split(area);
+    let inner = chunks[0].inner(Margin::new(1, 1));
+    if r < inner.y
+        || r >= inner.y + inner.height
+        || c < chunks[0].x + 1
+        || c >= chunks[0].x + chunks[0].width - 1
+    {
+        app.last_click_at = None;
+        return;
+    }
+    let i = (r - inner.y) as usize;
+    if i >= app.char_list.len() {
+        app.last_click_at = None;
+        return;
+    }
+    let now = Instant::now();
+    let dbl = is_double_click(app, now, (r, c));
+    app.last_click_at = Some(now);
+    app.last_click_pos = Some((r, c));
+    if !dbl {
+        app.char_sel = i;
+        return;
+    }
+    app.select_character(i);
+    app.last_click_at = None;
+}
+
 /// The Esc menu (and subviews) as a full-screen list: the selected row
 /// reversed, a footer hint above the bottom border.
 fn draw_menu_view(f: &mut Frame, app: &App, area: Rect, view: MenuView) {
@@ -4240,7 +4287,7 @@ fn draw_charselect(f: &mut Frame, app: &App) {
     let hint = Paragraph::new(vec![
         Line::from(Span::raw(&app.status)),
         Line::from(Span::styled(
-            "↑/↓ select · Enter enter world · C create · D delete · Esc quit",
+            "↑/↓ or click: select · Enter or dbl-click: enter world · C create · D delete · Esc quit",
             ts(app, Style::default().fg(Color::DarkGray)),
         )),
     ]);
@@ -4390,7 +4437,7 @@ fn draw_center_box(f: &mut Frame, app: &App, title: &str, lines: &[&str], title_
 
 #[cfg(test)]
 mod tests {
-    use super::{item_glyph, ITEM_TYPES, WIDGET_GLYPHS};
+    use super::{item_glyph, mouse, App, Phase, Rect, ITEM_TYPES, WIDGET_GLYPHS};
     use ratatui::buffer::Buffer;
     use ratatui::style::Style;
 
@@ -4444,5 +4491,57 @@ mod tests {
             );
         }
         assert_eq!(item_glyph(0), '?');
+    }
+
+    /// A single click on a character-list row moves the selection to that
+    /// character (the "list row" mouse convention) without entering the world.
+    #[test]
+    fn charselect_click_moves_selection() {
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        app.phase = Phase::CharSelect;
+        app.char_list = (1..=3)
+            .map(|g| acproto::messages::CharacterListEntry {
+                guid: g,
+                name: format!("char{}", g),
+                time_since_delete: 0,
+            })
+            .collect();
+        let ev = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 3,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        mouse(&mut app, Rect::new(0, 0, 80, 24), &ev);
+        assert_eq!(app.char_sel, 2, "clicking the 3rd row selects it");
+        assert_eq!(app.phase, Phase::CharSelect, "a single click must not enter the world");
+    }
+
+    /// A double click on a character-list row enters the world as that
+    /// character (the keyboard Enter branch), mirroring the in-world Esc menu.
+    #[test]
+    fn charselect_double_click_enters_world() {
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        app.phase = Phase::CharSelect;
+        app.char_list = (1..=2)
+            .map(|g| acproto::messages::CharacterListEntry {
+                guid: g,
+                name: format!("char{}", g),
+                time_since_delete: 0,
+            })
+            .collect();
+        let ev = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 2,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let area = Rect::new(0, 0, 80, 24);
+        mouse(&mut app, area, &ev);
+        assert_eq!(app.char_sel, 1, "first click selects the 2nd character");
+        assert_eq!(app.phase, Phase::CharSelect);
+        mouse(&mut app, area, &ev);
+        assert_eq!(app.phase, Phase::Entering, "double click must enter the world");
+        assert_eq!(app.self_guid, Some(2), "the clicked character is the one entered");
     }
 }
