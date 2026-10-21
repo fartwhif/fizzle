@@ -927,7 +927,15 @@ fn build_actors(app: &App) -> Vec<Actor> {
             mtable_id: e.mtable_id,
             setup_id: e.setup_id,
             model_parts: e.model_parts.clone(),
-            motion_cmd: if e.is_player { e.motion_cmd } else { MCMD_READY },
+            // Doors keep the server's On/Off motion command (the renderer
+            // drives the model swing from the registered door slab; the
+            // command also selects the mtable's open/closed cycle when no
+            // slab is registered).
+            motion_cmd: if e.is_player || e.item_type == ITEM_TYPE_DOOR {
+                e.motion_cmd
+            } else {
+                MCMD_READY
+            },
             style: if e.style != 0 || e.is_player {
                 e.style
             } else {
@@ -3022,7 +3030,7 @@ fn trade_item_at(app: &App, lb: WLayout, r: u16, c: u16) -> Option<(u32, usize)>
     };
     for (i, &g) in guids.iter().enumerate() {
         let col = x0 + 2 * i as u16;
-        if col + 1 > lb.left_w - 2 {
+        if col + 1 > lb.left_w - 1 {
             break;
         }
         if c == col {
@@ -3547,9 +3555,10 @@ fn pick_world3d(app: &App, lb: WLayout, r: u16, c: u16) -> Option<u32> {
         };
         // Line of sight: an entity hidden behind terrain, a wall, or a closed
         // door from the camera can't be clicked. Occluded ones are skipped so
-        // a nearer visible one still wins.
+        // a nearer visible one still wins. A door's own slab is excluded: its
+        // pick anchor sits inside it, so it would always occlude itself.
         if let Some(w) = w3d {
-            if !w.line_of_sight(basis.cam, [wx, wy, wz]) {
+            if !w.line_of_sight(basis.cam, [wx, wy, wz], (e.item_type == ITEM_TYPE_DOOR).then_some(e.guid)) {
                 continue;
             }
         }
@@ -3969,7 +3978,7 @@ fn view_press(app: &mut App, view: MenuView, r: u16, c: u16, h: u16, w: u16) {
     }
     let i = (r - 2) as usize;
     let n = match view {
-        MenuView::Menu => 7,
+        MenuView::Menu => MENU_ITEMS.len(),
         MenuView::Themes => 4,
         MenuView::Widgets => 14,
         MenuView::WorldView => 2,
@@ -3985,7 +3994,7 @@ fn view_press(app: &mut App, view: MenuView, r: u16, c: u16, h: u16, w: u16) {
     app.last_click_pos = Some((r, c));
     if !dbl {
         match view {
-            MenuView::Menu => app.menu_sel = i.min(6),
+            MenuView::Menu => app.menu_sel = i.min(MENU_ITEMS.len() - 1),
             MenuView::Themes => app.theme_sel = i.min(3),
             MenuView::Widgets => app.widget_sel = i.min(13),
             MenuView::WorldView => app.worldview_sel = i.min(1),
@@ -4437,7 +4446,7 @@ fn draw_center_box(f: &mut Frame, app: &App, title: &str, lines: &[&str], title_
 
 #[cfg(test)]
 mod tests {
-    use super::{item_glyph, mouse, App, Phase, Rect, ITEM_TYPES, WIDGET_GLYPHS};
+    use super::{item_glyph, mouse, trade_item_at, App, MenuView, Phase, Rect, WLayout, ITEM_TYPES, WIDGET_GLYPHS};
     use ratatui::buffer::Buffer;
     use ratatui::style::Style;
 
@@ -4543,5 +4552,57 @@ mod tests {
         mouse(&mut app, area, &ev);
         assert_eq!(app.phase, Phase::Entering, "double click must enter the world");
         assert_eq!(app.self_guid, Some(2), "the clicked character is the one entered");
+    }
+
+    /// A single click on the menu's last row (Quit) moves the selection
+    /// there, and a double click quits — every row the keyboard reaches
+    /// (8 items) must be reachable by the mouse.
+    #[test]
+    fn menu_click_reaches_quit_row() {
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        app.phase = Phase::InWorld;
+        app.menu_view = Some(MenuView::Menu);
+        let ev = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 9, // the Quit row: item index 7 at row 2 + 7
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let area = Rect::new(0, 0, 80, 24);
+        mouse(&mut app, area, &ev);
+        assert_eq!(app.menu_sel, 7, "clicking the Quit row selects it");
+        mouse(&mut app, area, &ev);
+        assert!(app.quit, "double click on the Quit row quits");
+    }
+
+    /// A trade glyph drawn in the box's last inner column (left_w - 2) must
+    /// be pickable — the pick boundary must mirror the draw pass's, or the
+    /// last visible glyph is unclickable.
+    #[test]
+    fn trade_pick_reaches_last_inner_column() {
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        app.world.trade.partner = 1;
+        // 17 offered items: glyph i sits at col 6 + 2i, so i = 16 lands at
+        // col 38 = left_w - 2, the last inner column.
+        app.world.trade.our = (100..117).collect();
+        let lb = WLayout {
+            body_h: 22,
+            left_w: 40,
+            right_w: 38,
+            right_x: 40,
+            radar_h: 10,
+            multi_y1: 5,
+            world_y0: 4,
+            world_y1: 19,
+            widget_y0: 4,
+            widget_y1: 11,
+            chat_y0: 20,
+        };
+        let col = lb.left_w - 2;
+        let row = lb.widget_y0 + 1;
+        let Some((guid, i)) = trade_item_at(&app, lb, row, col) else {
+            panic!("the glyph at the last inner column (col {col}) must be pickable");
+        };
+        assert_eq!((guid, i), (116, 16));
     }
 }

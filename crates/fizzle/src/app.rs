@@ -727,6 +727,15 @@ impl App {
                         }
                     }
                 }
+                // The open loot window's ViewContents placeholders carry no
+                // item data; each item's ObjectCreate (ContainerId = the
+                // window's container) fills its entry in as it lands.
+                if o.container_id != 0 && o.container_id == self.world.container.guid {
+                    let mut filled = item.clone();
+                    filled.container_id = o.container_id;
+                    self.world.container.items.retain(|i| i.guid != o.guid);
+                    self.world.container.items.push(filled);
+                }
                 // Register a door's collision slab with the 3D world; a
                 // closed door blocks the movement sim, an open one does not.
                 if o.item_type == crate::world::ITEM_TYPE_DOOR {
@@ -782,6 +791,33 @@ impl App {
                 // A vanished door drops its collision slab.
                 if let Some(w) = self.world3d.as_mut() {
                     w.remove_door(guid);
+                }
+                // Session state that references the vanished object drops with
+                // it (no separate message arrives for any of this): a target
+                // on it, an open vendor shop / trade / dialog, a side-pack
+                // entry, and the open loot window's contents (or the window
+                // itself).
+                match self.target {
+                    Some(Target::World(t)) | Some(Target::Item(t, _)) if t == guid => {
+                        self.target = None;
+                    }
+                    _ => {}
+                }
+                if self.world.vendor.guid == guid {
+                    self.world.vendor = Default::default();
+                    self.confirm_close_vendor = false;
+                }
+                if self.world.trade.partner == guid {
+                    self.world.trade = Default::default();
+                }
+                self.world.inventory.packs.retain(|&p| p != guid);
+                if self.talk_to == Some(guid) {
+                    self.talk_to = None;
+                }
+                if guid != 0 && self.world.container.guid == guid {
+                    self.world.container = Default::default();
+                } else {
+                    self.world.container.items.retain(|i| i.guid != guid);
                 }
             }
             Incoming::UpdatePosition(up) => {
@@ -1075,7 +1111,47 @@ impl App {
             }
             Event::InventoryPutObjInContainer { obj_guid, container_guid, .. } => {
                 if Some(container_guid) == self.self_guid {
-                    self.world.unequip_to_pack(obj_guid);
+                    // The item now sits in the player: looted from the open
+                    // window, picked up from the ground, or unequipped. A
+                    // container move gets no ObjectCreate re-stream or
+                    // ObjectDelete, so move the tracked state by hand.
+                    let in_window = self.world.container.items.iter().any(|i| i.guid == obj_guid);
+                    let in_world = self.world.entities.contains_key(&obj_guid);
+                    if in_window || in_world {
+                        let mut item = self
+                            .world
+                            .container
+                            .items
+                            .iter()
+                            .find(|i| i.guid == obj_guid)
+                            .cloned()
+                            .unwrap_or_else(|| self.world.item_state(obj_guid));
+                        item.container_id = container_guid;
+                        item.cur_loc = 0;
+                        self.world.container.items.retain(|i| i.guid != obj_guid);
+                        self.world.object_delete(obj_guid);
+                        self.world.upsert_pack_item(item);
+                    } else {
+                        // A worn item coming off the paper doll into the pack.
+                        self.world.unequip_to_pack(obj_guid);
+                    }
+                } else if container_guid != 0 && container_guid == self.world.container.guid {
+                    // Put-back into the open ground container: the item leaves
+                    // the pack/paper doll and the window gains it (the client
+                    // derives the window from the containerId change).
+                    if let Some(mut item) = self.world.take_pack_or_equipped(obj_guid) {
+                        item.container_id = container_guid;
+                        self.world.container.items.retain(|i| i.guid != obj_guid);
+                        self.world.container.items.push(item);
+                    }
+                } else if container_guid != 0
+                    && !self.world.inventory.packs.contains(&container_guid)
+                {
+                    // The item moved into a container we don't track (a
+                    // vendor on a sell, another player, …): it has left the
+                    // player. A sell never ObjectDeletes the item, so this
+                    // event is the only signal.
+                    self.world.drop_item(obj_guid);
                 }
             }
             Event::WieldObject { obj_guid, location } => {
@@ -3090,6 +3166,13 @@ impl App {
                     self.phase = Phase::CharSelect;
                     self.world = World::new();
                     self.movement = None;
+                    self.targets.clear();
+                    self.keys_down.clear();
+                    self.chat_buf.clear();
+                    self.chat_focused = false;
+                    self.pending_jump = false;
+                    self.pending_teleport = false;
+                    self.menu_view = None;
                     self.logoff_sent_at = None;
                     self.status = "Logged out.".into();
                 }
@@ -3104,6 +3187,13 @@ impl App {
             // per event-loop iteration (faster than 20 Hz under key repeat),
             // running the movement — and the terrain/solid probe — fast.
             self.last_tick = now;
+            // Advance door swings on the tick clock (not the render clock) so
+            // a door's collision state is right even when the 3D pane isn't
+            // being drawn; the movement tick below then probes the updated
+            // state.
+            if let Some(w) = self.world3d.as_mut() {
+                w.tick();
+            }
             let mut held = self.held_keys();
             held.jump = self.pending_jump;
             self.pending_jump = false;
@@ -3646,5 +3736,289 @@ mod tests {
         app.clear_target();
         assert_eq!(app.target(), None);
         assert_eq!(app.current_target(), None);
+    }
+
+    // -------------------------------------------------- loot / container flow
+
+    /// A minimal `ObjectCreate` for the loot-flow tests.
+    fn oc(guid: u32, container_id: u32, name: &str, item_type: u32, value: u32) -> messages::ObjectCreate {
+        messages::ObjectCreate {
+            guid,
+            name: Some(name.to_string()),
+            position: None,
+            item_type,
+            value,
+            stack_size: 1,
+            items_capacity: 0,
+            container_id,
+            wielder_id: 0,
+            valid_locs: 0,
+            cur_loc: 0,
+            mtable_id: None,
+            setup_id: None,
+            model_parts: None,
+            is_vendor: false,
+            motion_cmd: 0,
+            physics_state: 0,
+        }
+    }
+
+    /// Wrap an `Event` in a `GameEvent` incoming message (player guid 5).
+    fn ge(event: Event) -> Incoming {
+        Incoming::GameEvent(GameEvent { player_guid: 5, evt_seq: 1, event_type: 0, event })
+    }
+
+    /// Regression for "the loot box is blank": `ViewContents` carries only
+    /// the item guids (no item data); the per-item `ObjectCreate` stream
+    /// (each carrying the container's guid as `ContainerId`) follows
+    /// (PROTOCOL.md §24.2). The window must show the real items once their
+    /// creates land, not the empty placeholders built at ViewContents time.
+    #[test]
+    fn loot_window_items_populated_by_late_object_create() {
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        app.phase = Phase::InWorld;
+        app.self_guid = Some(5);
+        app.world.self_guid = Some(5);
+
+        // The chest opens: ViewContents lists the item guids only.
+        app.dispatch(ge(Event::ViewContents { container_guid: 100, items: vec![(200, 0)] }));
+        assert_eq!(app.world.container.guid, 100);
+        assert_eq!(app.world.container.items.len(), 1);
+
+        // The item's ObjectCreate arrives after the ViewContents.
+        app.dispatch(Incoming::ObjectCreate(oc(200, 100, "Iron Sword", 32, 10)));
+        assert_eq!(
+            app.world.container.items[0].name,
+            "Iron Sword",
+            "loot item must show its name once its ObjectCreate lands"
+        );
+        assert_eq!(app.world.container.items[0].item_type, 32);
+        assert_eq!(app.world.container.items[0].value, 10);
+    }
+
+    /// Regression for "the loot window keeps showing items that are gone":
+    /// a chest reset empties via `ObjectDelete` of the contents while the
+    /// box is open (PROTOCOL.md §24.3), and a despawned corpse/chest is
+    /// itself `ObjectDelete`d. Stale entries let Take All send loot packets
+    /// for items that no longer exist.
+    #[test]
+    fn object_delete_purges_open_container_state() {
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        app.phase = Phase::InWorld;
+        app.self_guid = Some(5);
+        app.world.self_guid = Some(5);
+        app.dispatch(ge(Event::ViewContents { container_guid: 100, items: vec![(200, 0)] }));
+        app.dispatch(Incoming::ObjectCreate(oc(200, 100, "Iron Sword", 32, 10)));
+
+        // A chest reset deletes the contents (not the chest): the item must
+        // leave the open window.
+        app.dispatch(Incoming::ObjectDelete(200));
+        assert!(
+            app.world.container.items.iter().all(|i| i.guid != 200),
+            "a reset chest's deleted item must leave the open loot window"
+        );
+        // The chest is still open.
+        assert_eq!(app.world.container.guid, 100);
+
+        // The chest itself despawns: the window must close.
+        app.dispatch(Incoming::ObjectDelete(100));
+        assert_eq!(
+            app.world.container.guid,
+            0,
+            "a deleted container must close the loot window"
+        );
+    }
+
+    /// Regression for "a sold item stays in my backpack": a sell never gets
+    /// an `ObjectDelete` — the `InventoryPutObjInContainer` with the vendor
+    /// as the new container is the only signal the item left the player
+    /// (PROTOCOL.md §21.4). It must be dropped from the inventory.
+    #[test]
+    fn sell_removes_item_from_inventory() {
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        app.phase = Phase::InWorld;
+        app.self_guid = Some(5);
+        app.world.self_guid = Some(5);
+        app.world.upsert_pack_item(ItemState {
+            guid: 7,
+            name: "Dagger".into(),
+            item_type: 32,
+            ..Default::default()
+        });
+
+        // The server records the item as now contained by the vendor.
+        app.dispatch(ge(Event::InventoryPutObjInContainer {
+            obj_guid: 7,
+            container_guid: 900,
+            placement: 0,
+            container_type: 0,
+        }));
+        assert!(
+            app.world.inventory.pack.iter().all(|i| i.guid != 7)
+                && app.world.inventory.equipped.iter().all(|i| i.guid != 7),
+            "a sold item must leave the inventory (no ObjectDelete ever comes)"
+        );
+    }
+
+    /// Regression for "looting doesn't update the backpack or the loot box":
+    /// a loot is an `InventoryPutObjInContainer` with the player as the new
+    /// container — the server sends no `ObjectCreate` re-stream for container
+    /// moves (PROTOCOL.md §24.2). The item must move from the open loot
+    /// window into the main pack; a ground pickup moves it from the world in.
+    #[test]
+    fn loot_move_updates_pack_and_window() {
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        app.phase = Phase::InWorld;
+        app.self_guid = Some(5);
+        app.world.self_guid = Some(5);
+        // Open the chest and let its item land.
+        app.dispatch(ge(Event::ViewContents { container_guid: 100, items: vec![(200, 0)] }));
+        app.dispatch(Incoming::ObjectCreate(oc(200, 100, "Iron Sword", 32, 10)));
+
+        // Loot the sword into the main pack (container = the player).
+        app.dispatch(ge(Event::InventoryPutObjInContainer {
+            obj_guid: 200,
+            container_guid: 5,
+            placement: 0,
+            container_type: 0,
+        }));
+        assert!(
+            app.world.container.items.iter().all(|i| i.guid != 200),
+            "a looted item must leave the loot window"
+        );
+        assert!(
+            app.world.inventory.pack.iter().any(|i| i.guid == 200 && i.name == "Iron Sword"),
+            "a looted item must appear in the main pack"
+        );
+
+        // Ground pickup: a world item (no window involved) lands in the pack
+        // and stops being a world entity.
+        app.dispatch(Incoming::ObjectCreate(oc(300, 0, "Potion", 16384, 5)));
+        app.dispatch(ge(Event::InventoryPutObjInContainer {
+            obj_guid: 300,
+            container_guid: 5,
+            placement: 0,
+            container_type: 0,
+        }));
+        assert!(
+            app.world.inventory.pack.iter().any(|i| i.guid == 300 && i.name == "Potion"),
+            "a picked-up ground item must appear in the main pack"
+        );
+        assert!(
+            !app.world.entities.contains_key(&300),
+            "a picked-up ground item must stop being a world entity"
+        );
+    }
+
+    /// Regression for "a put-back item is in two places": putting a pack item
+    /// back into the open ground container moves it out of the main-pack view
+    /// and into the window (the client derives the loot window from the
+    /// `containerId` change, PROTOCOL.md §24.2).
+    #[test]
+    fn putback_moves_item_from_pack_to_open_container() {
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        app.phase = Phase::InWorld;
+        app.self_guid = Some(5);
+        app.world.self_guid = Some(5);
+        // An item in the main pack, and a chest open next to it.
+        app.world.upsert_pack_item(ItemState {
+            guid: 200,
+            name: "Iron Sword".into(),
+            item_type: 32,
+            value: 10,
+            ..Default::default()
+        });
+        app.dispatch(ge(Event::ViewContents { container_guid: 100, items: vec![] }));
+
+        // Put the sword back into the chest.
+        app.dispatch(ge(Event::InventoryPutObjInContainer {
+            obj_guid: 200,
+            container_guid: 100,
+            placement: 0,
+            container_type: 0,
+        }));
+        assert!(
+            app.world.inventory.pack.iter().all(|i| i.guid != 200),
+            "a put-back item must leave the main pack"
+        );
+        assert!(
+            app.world.container.items.iter().any(|i| i.guid == 200 && i.name == "Iron Sword"),
+            "a put-back item must appear in the open container's window"
+        );
+    }
+
+    /// Regression for "the logout fallback leaks into the next world": the
+    /// 25 s logoff timeout (server never confirms) is a local logout and
+    /// must clear the same in-world transient state as the server-confirmed
+    /// `CharacterLogOff` (see `character_logoff_clears_inworld_transient_state`).
+    #[test]
+    fn logoff_timeout_fallback_clears_inworld_state() {
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        app.phase = Phase::LoggingOut;
+        app.logoff_sent_at = Some(Instant::now() - Duration::from_secs(26));
+        app.menu_view = Some(MenuView::Menu);
+        app.chat_focused = true;
+        app.chat_buf = "stale".into();
+        app.keys_down.insert(KeyCode::Char('w'), Instant::now());
+        app.pending_jump = true;
+
+        app.step(Instant::now());
+
+        assert!(matches!(app.phase, Phase::CharSelect));
+        assert!(app.menu_view.is_none(), "stale menu would swallow the next world's first Esc");
+        assert!(!app.chat_focused, "stale chat focus swallows the next world's typing");
+        assert!(app.chat_buf.is_empty(), "stale chat buffer would be resent on the next Enter");
+        assert!(app.keys_down.is_empty());
+        assert!(!app.pending_jump);
+    }
+
+    /// Regression for "targeting a deleted entity": when the targeted
+    /// object is `ObjectDelete`d the target (world or item) must clear
+    /// immediately, and the other session state that references the object
+    /// (vendor shop, trade partner, side-pack list, NPC talk) must drop too
+    /// (world.rs `object_delete`: "the session does that").
+    #[test]
+    fn object_delete_clears_dependent_session_state() {
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        app.phase = Phase::InWorld;
+        app.self_guid = Some(5);
+        app.world.self_guid = Some(5);
+
+        // A vendor shop open on vendor 900, a trade with partner 700, a
+        // side pack 600, talking to NPC 800, and a world target on 700.
+        app.world.vendor.guid = 900;
+        app.world.trade.partner = 700;
+        app.world.inventory.packs.push(600);
+        app.talk_to = Some(800);
+        app.set_world_target(700);
+
+        // The trade partner vanishes.
+        app.dispatch(Incoming::ObjectDelete(700));
+        assert_eq!(app.current_target(), None, "targeting a deleted entity must clear the target");
+        assert_eq!(app.world.trade.partner, 0, "a deleted trade partner must close the trade");
+        // The other references are untouched.
+        assert_eq!(app.world.vendor.guid, 900);
+        assert!(app.world.inventory.packs.contains(&600));
+        assert_eq!(app.talk_to, Some(800));
+
+        // The vendor despawns.
+        app.dispatch(Incoming::ObjectDelete(900));
+        assert_eq!(app.world.vendor.guid, 0, "a deleted vendor must close the shop");
+
+        // The side pack is gone (dropped/sold).
+        app.dispatch(Incoming::ObjectDelete(600));
+        assert!(
+            !app.world.inventory.packs.contains(&600),
+            "a deleted side pack must leave the pack list"
+        );
+
+        // The NPC we were talking to despawns.
+        app.dispatch(Incoming::ObjectDelete(800));
+        assert_eq!(app.talk_to, None, "a deleted talk target must end the dialog");
+
+        // An item target on a deleted item clears too.
+        app.set_item_target(400, crate::world::TARGET_ITEM_CONTAINER);
+        app.dispatch(Incoming::ObjectDelete(400));
+        assert_eq!(app.target(), None, "an item target on a deleted item must clear");
     }
 }

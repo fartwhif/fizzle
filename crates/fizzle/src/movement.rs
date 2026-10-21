@@ -311,11 +311,15 @@ impl Movement {
 
         self.moving = !held.is_idle() || !self.grounded;
 
-        // Send MoveToState when the signature changed.
+        // Send MoveToState when the signature changed. It carries our current
+        // position (the server adopts and echoes it), so it refreshes
+        // `last_sent` — otherwise the echo of a `MoveToState` sent up to 1 s
+        // after the last `AutonomousPosition` reads as a correction.
         let sig = self.signature(held, walking);
         if sig != self.last_sig {
             out.push(MoveAction::Send(0xF61C, self.build_move_to_state(&sig, walking)));
             self.last_sig = sig;
+            self.last_sent = self.pos;
         }
 
         // Send AutonomousPosition at most 1 Hz while moving.
@@ -448,5 +452,42 @@ mod tests {
         let mut m = mv();
         drive(&mut m, HeldKeys::default(), true);
         assert_eq!(m.motion_cmd(), command::READY);
+    }
+
+    /// Regression: `MoveToState` carries our current position, and the server
+    /// adopts and echoes it back via the self `UpdatePosition` (PROTOCOL.md
+    /// §20.6). `last_sent` must therefore track *every* position we send, not
+    /// just the 1 Hz `AutonomousPosition`. If it lags, the echo of a
+    /// `MoveToState` position — up to a full second (≈5 u at run speed) behind
+    /// the last `AutonomousPosition` — reads as a server correction and the
+    /// character snaps backward on every direction change while moving.
+    #[test]
+    fn move_to_state_echo_is_not_a_correction() {
+        let mut m = mv();
+        // Start walking: a fresh `MoveToState` and an immediate
+        // `AutonomousPosition` go out from the first integrated step.
+        drive(&mut m, HeldKeys { forward: true, ..Default::default() }, true);
+        let first_sent = m.pos;
+        // Walk another 0.5 s (10 ticks) without a signature change: the 1 Hz
+        // `AutonomousPosition` has not re-fired, so the last *sent* position
+        // is still `first_sent` (~1.5 u behind the live sim).
+        for _ in 0..10 {
+            drive(&mut m, HeldKeys { forward: true, ..Default::default() }, true);
+        }
+        // Turn: the signature changes, so a `MoveToState` goes out carrying
+        // the current position, and the server will echo exactly that back.
+        let sent = m.pos;
+        let dist = ((sent.x - first_sent.x).powi(2) + (sent.y - first_sent.y).powi(2)).sqrt();
+        assert!(dist > 0.25, "the echo must be farther than the snap threshold from the stale position");
+        drive(&mut m, HeldKeys { turn_right: true, ..Default::default() }, true);
+
+        // The echo of our own `MoveToState` position must be classified as an
+        // echo, not a correction: no snap, no forced re-broadcast.
+        assert!(
+            !m.apply_correction(m.cell, &sent, false),
+            "echo of our own MoveToState position must not be treated as a server correction"
+        );
+        assert_eq!(m.pos, sent, "an echo must not move the sim");
+        assert_eq!(m.motion_cmd(), command::TURN_RIGHT, "an echo must not clear the motion signature");
     }
 }

@@ -17,11 +17,19 @@ use crate::world::{ChatLine, ChatStyle};
 pub struct Plain {
     last_total: u64,
     last_phase: Phase,
+    out: Box<dyn Write>,
 }
 
 impl Plain {
     pub fn new() -> Self {
-        Self { last_total: 0, last_phase: Phase::Idle }
+        Self { last_total: 0, last_phase: Phase::Idle, out: Box::new(std::io::stdout()) }
+    }
+
+    /// Inject the output sink (tests).
+    #[must_use]
+    #[cfg(test)]
+    fn new_with(out: Box<dyn Write>) -> Self {
+        Self { last_total: 0, last_phase: Phase::Idle, out }
     }
 
     /// Clock as `HH:MM:SS` (UTC) — unambiguous and docker-log friendly.
@@ -33,9 +41,9 @@ impl Plain {
         format!("{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
     }
 
-    fn w(&self, line: &str) {
-        let _ = writeln!(std::io::stdout(), "[{}] {}", Self::ts(), line);
-        let _ = std::io::stdout().flush();
+    fn w(&mut self, line: &str) {
+        let _ = writeln!(self.out, "[{}] {}", Self::ts(), line);
+        let _ = self.out.flush();
     }
 
     /// Format one chat line for plain output.
@@ -61,6 +69,12 @@ impl Plain {
     /// Print new chat lines and any phase transition since the last sync.
     pub fn sync(&mut self, app: &App) {
         let chat = &app.world.chat;
+        // A world reset (reconnect) rebuilds the chat log: `total` restarts
+        // at 0, so a stale cursor would swallow every new line until it
+        // caught up. Rebase to print the whole (new) log.
+        if chat.total < self.last_total {
+            self.last_total = 0;
+        }
         if chat.total > self.last_total {
             let new = (chat.total - self.last_total) as usize;
             let len = chat.len();
@@ -123,4 +137,51 @@ pub fn run(app: &mut App) -> anyhow::Result<()> {
         disable_raw_mode()?;
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::io;
+    use std::rc::Rc;
+
+    /// A capturing `Write` sink for tests.
+    #[derive(Clone, Default)]
+    struct Cap(Rc<RefCell<Vec<u8>>>);
+
+    impl Write for Cap {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Regression: on a reconnect the world (and its chat log) is rebuilt, so
+    /// `chat.total` restarts at 0. The stale `last_total` cursor must rebase,
+    /// otherwise every chat line of the new session is silently dropped until
+    /// the new total catches up with the old one.
+    #[test]
+    fn chat_lines_after_world_reset_are_printed() {
+        let cap = Cap::default();
+        let mut plain = Plain::new_with(Box::new(cap.clone()));
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        for _ in 0..3 {
+            app.world.chat.push("npc", "old session", ChatStyle::Speech);
+        }
+        plain.sync(&app);
+        assert_eq!(plain.last_total, 3);
+
+        // A reconnect resets the world (app.rs `server_died`).
+        app.world = crate::world::World::new();
+        app.world.chat.push("npc", "new session", ChatStyle::Speech);
+        plain.sync(&app);
+
+        assert_eq!(plain.last_total, 1, "the cursor must rebase on the reset log");
+        let out = String::from_utf8(cap.0.borrow().clone()).unwrap();
+        assert!(out.contains("new session"), "the post-reset line must be printed; got: {out}");
+    }
 }

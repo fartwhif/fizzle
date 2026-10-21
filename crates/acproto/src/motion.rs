@@ -176,7 +176,7 @@ pub struct MotionEvent {
 /// collect the parsed command list (door state); positions come from
 /// UpdatePosition.
 pub fn parse_motion(data: &[u8]) -> Option<MotionEvent> {
-    if data.len() < 14 {
+    if data.len() < 16 {
         return None;
     }
     let guid = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
@@ -344,6 +344,19 @@ mod tests {
         assert_eq!(e.style, 0x003e);
         // Ready (forward) + ThrustMed (command list, passed through raw).
         assert_eq!(e.commands, vec![0x4100_0003, 0x0058]);
+    }
+
+    #[test]
+    fn parse_motion_truncated_header_no_panic() {
+        // A truncated S2C Motion body must not panic. The header is 16 bytes
+        // (guid, instanceSeq, movementSeq, serverControlSeq, isAutonomous,
+        // pad, movementType, motionFlags, currentStyle); shorter bodies return
+        // None, and a header-only body parses with no commands.
+        assert!(parse_motion(&[0u8; 13]).is_none());
+        assert!(parse_motion(&[0u8; 14]).is_none());
+        assert!(parse_motion(&[0u8; 15]).is_none());
+        let e = parse_motion(&[0u8; 16]).expect("header-only body");
+        assert!(e.commands.is_empty());
     }
 
     #[test]

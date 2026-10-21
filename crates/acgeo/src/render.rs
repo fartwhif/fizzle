@@ -101,6 +101,9 @@ const MCMD_TURN_RIGHT: u32 = 0x6500000d;
 const MCMD_TURN_LEFT: u32 = 0x6500000e;
 const MCMD_SIDESTEP_RIGHT: u32 = 0x6500000f;
 const MCMD_SIDESTEP_LEFT: u32 = 0x65000010;
+/// Door open / closed motion commands (the wire's On / Off forward command).
+const MCMD_DOOR_ON: u32 = 0x4000000b;
+const MCMD_DOOR_OFF: u32 = 0x4000000c;
 
 // ---------------------------------------------------------------------------
 // public state types
@@ -182,11 +185,27 @@ impl Default for AnimClock {
     }
 }
 
-fn now_secs() -> f64 {
+pub(crate) fn now_secs() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as f64 + d.subsec_micros() as f64 * 1e-6)
         .unwrap_or(0.0)
+}
+
+/// Advance every door's swing toward its goal by the elapsed wall-clock time
+/// (frame-rate independent). Shared by the app tick (so the collision state
+/// never depends on the render cadence) and the render pass.
+pub(crate) fn advance_doors(doors: &mut std::collections::HashMap<u32, Door>, now: f64) {
+    for d in doors.values_mut() {
+        let dt = if d.last_now < 0.0 { 0.0 } else { (now - d.last_now).max(0.0) };
+        d.last_now = now;
+        let step = (dt / DOOR_SWING_SECS) as f32;
+        if d.open < d.goal {
+            d.open = (d.open + step).min(d.goal);
+        } else if d.open > d.goal {
+            d.open = (d.open - step).max(d.goal);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -366,6 +385,8 @@ fn occlude_camera_back(
 /// `tri_t` (unit ray, distance) tests the triangle meshes; a hit strictly
 /// in front of `to` (with a small margin so `to`'s own coincident surface
 /// doesn't count) occludes. Closed doors use the segment-vs-AABB test.
+/// `ignore_door` skips one door's slab: a door's pick anchor sits inside its
+/// own closed slab, so without the skip a closed door could never see itself.
 #[must_use]
 pub(crate) fn segment_blocked(
     soup: Option<&[f32]>,
@@ -373,6 +394,7 @@ pub(crate) fn segment_blocked(
     doors: &HashMap<u32, Door>,
     from: [f32; 3],
     to: [f32; 3],
+    ignore_door: Option<u32>,
 ) -> bool {
     let (dx, dy, dz) = (to[0] - from[0], to[1] - from[1], to[2] - from[2]);
     let l = (dx * dx + dy * dy + dz * dz).sqrt();
@@ -410,8 +432,12 @@ pub(crate) fn segment_blocked(
             }
         }
     }
-    // A door occludes the target until it has mostly swung clear.
-    for d in doors.values() {
+    // A door occludes the target until it has mostly swung clear (except the
+    // target's own slab — `ignore_door`).
+    for (g, d) in doors {
+        if Some(*g) == ignore_door {
+            continue;
+        }
         if d.open < 0.9 && crate::collision::seg_box(from[0], from[1], from[2], dx, dy, dz, &d.aabb) {
             return true;
         }
@@ -1063,6 +1089,83 @@ fn row_frames(anim: &Animation, frame: usize, mirror: bool) -> (Frame, Vec<Frame
     (pos_frame, part_frames)
 }
 
+/// The swing animation a door mtable drives its open/close from: the On or
+/// Off cycle's first animation reference, else (door mtables are
+/// swing-only) the first cycle's. `None` without a motion table.
+fn door_swing_anim<'a>(scene: &'a mut Scene, a: &Actor) -> Option<&'a Animation> {
+    let mtable = scene.get_motion_table(a.mtable_id?)?;
+    let style = if a.style != 0 { a.style } else { mtable.default_style };
+    let anim_id = mtable
+        .cycles
+        .get(&cycle_key(style, MCMD_DOOR_ON))
+        .or_else(|| mtable.cycles.get(&cycle_key(style, MCMD_DOOR_OFF)))
+        .or_else(|| mtable.cycles.values().next())
+        .and_then(|md| md.anims.first())?
+        .anim_id;
+    scene.get_animation(anim_id)
+}
+
+/// One part frame at an animation row, or `IDENTITY` past the end.
+fn part_frame_at(anim: &Animation, f: usize, pi: usize) -> Frame {
+    let o = (f * anim.num_parts + pi) * 7;
+    if o + 7 <= anim.part_frames.len() {
+        Frame::new(
+            anim.part_frames[o],
+            anim.part_frames[o + 1],
+            anim.part_frames[o + 2],
+            anim.part_frames[o + 3],
+            anim.part_frames[o + 4],
+            anim.part_frames[o + 5],
+            anim.part_frames[o + 6],
+        )
+    } else {
+        IDENTITY
+    }
+}
+
+/// The door model's swing pose: the swing animation sampled at the
+/// fractional row `open * (num_frames - 1)`, so the model eases closed
+/// (row 0) to open (last row) in lockstep with the collision slab's
+/// `open`. `None` without a usable swing animation (the caller falls back
+/// to the static pose).
+fn door_swing_pose(scene: &mut Scene, a: &Actor, open: f32) -> Option<Pose> {
+    let anim = door_swing_anim(scene, a)?;
+    if anim.num_frames < 2 || anim.num_parts == 0 {
+        return None;
+    }
+    let t = (open as f64).clamp(0.0, 1.0) * (anim.num_frames - 1) as f64;
+    let lo = t.floor() as usize;
+    let hi = (lo + 1).min(anim.num_frames - 1);
+    let frac = (t - lo as f64) as f32;
+    // Adjacent rows differ by a few degrees, so a component lerp
+    // (+renormalize) is an adequate quaternion blend.
+    let mut part_frames = Vec::with_capacity(anim.num_parts);
+    for pi in 0..anim.num_parts {
+        let f0 = part_frame_at(anim, lo, pi);
+        let f1 = part_frame_at(anim, hi, pi);
+        let (qw, qx, qy, qz) = (
+            f0.qw + (f1.qw - f0.qw) * frac,
+            f0.qx + (f1.qx - f0.qx) * frac,
+            f0.qy + (f1.qy - f0.qy) * frac,
+            f0.qz + (f1.qz - f0.qz) * frac,
+        );
+        let n = (qw * qw + qx * qx + qy * qy + qz * qz).sqrt().max(1e-6);
+        part_frames.push(Frame::new(
+            f0.ox + (f1.ox - f0.ox) * frac,
+            f0.oy + (f1.oy - f0.oy) * frac,
+            f0.oz + (f1.oz - f0.oz) * frac,
+            qw / n,
+            qx / n,
+            qy / n,
+            qz / n,
+        ));
+    }
+    Some(Pose {
+        part_frames,
+        pos_frame: IDENTITY,
+    })
+}
+
 /// Build the per-frame dynamic triangle soup (12 floats/tri, world/block
 /// space) for the given actors, advancing each actor's animation clock.
 /// `None` when there is nothing to draw.
@@ -1070,6 +1173,7 @@ fn build_dynamic_soup(
     scene: &mut Scene,
     actors: &[Actor],
     anim: &mut HashMap<u32, AnimClock>,
+    doors: &HashMap<u32, Door>,
     now: f64,
 ) -> Option<Vec<f32>> {
     if actors.is_empty() {
@@ -1097,7 +1201,14 @@ fn build_dynamic_soup(
         if parts.is_empty() {
             continue;
         }
-        let pose = resolve_pose(scene, a, clock.anim_time);
+        // A registered door actor renders the model swing (sampled from its
+        // motion-table open/close animation) in lockstep with the collision
+        // slab's `open`, instead of a fixed pose.
+        let pose = match doors.get(&a.guid) {
+            Some(d) => door_swing_pose(scene, a, d.open)
+                .unwrap_or_else(|| resolve_pose(scene, a, clock.anim_time)),
+            None => resolve_pose(scene, a, clock.anim_time),
+        };
 
         // Actor's world frame (x/y wrapped into the current landblock's frame)
         let obj = Frame::new(
@@ -1202,7 +1313,10 @@ pub fn render_frame(
     }
     scene.load_landblock(lb);
     let now = now_secs();
-    let dyn_soup = build_dynamic_soup(scene, actors, anim, now);
+    // Advance the swings before the actor poses are built so the door model
+    // and its slab sample the same `open`.
+    advance_doors(doors, now);
+    let dyn_soup = build_dynamic_soup(scene, actors, anim, doors, now);
     let block_soup = scene.block_soup(lb);
     if block_soup.map_or(true, |s| s.is_empty()) && dyn_soup.as_ref().map_or(true, |s| s.is_empty()) {
         return None;
@@ -1245,21 +1359,8 @@ pub fn render_frame(
     if !statics.is_empty() {
         raster_statics(&mut cells, &mut depth, &basis, cols, rows, statics, light, fog_span);
     }
-    // Advance each door's swing toward its goal (frame-rate independent),
-    // then rasterize the swung slab.
-    for d in doors.values_mut() {
-        let dt = if d.last_now < 0.0 {
-            0.0
-        } else {
-            (now - d.last_now).max(0.0)
-        };
-        d.last_now = now;
-        let step = (dt / DOOR_SWING_SECS) as f32;
-        if d.open < d.goal {
-            d.open = (d.open + step).min(d.goal);
-        } else if d.open > d.goal {
-            d.open = (d.open - step).max(d.goal);
-        }
+    // Rasterize the swung slabs (the swings already advanced above).
+    for d in doors.values() {
         raster_door_box(&mut cells, &mut depth, &basis, (cols, rows), d, light, fog_span);
     }
     if let Some(d) = &dyn_soup {
@@ -1317,13 +1418,13 @@ mod tests {
         let walls = [wall_solid()];
         // Camera (5,10,1) → target (15,10,1): crosses the wall at x = 10,
         // where the triangle covers z 0..2.5 (z = 1 is inside).
-        assert!(segment_blocked(None, &walls, &doors, [5.0, 10.0, 1.0], [15.0, 10.0, 1.0]));
+        assert!(segment_blocked(None, &walls, &doors, [5.0, 10.0, 1.0], [15.0, 10.0, 1.0], None));
         // Same ray higher up (z = 3 > 2.5 at y = 10): clear of the wall.
-        assert!(!segment_blocked(None, &walls, &doors, [5.0, 10.0, 3.0], [15.0, 10.0, 3.0]));
+        assert!(!segment_blocked(None, &walls, &doors, [5.0, 10.0, 3.0], [15.0, 10.0, 3.0], None));
         // No geometry at all: clear.
-        assert!(!segment_blocked(None, &[], &doors, [5.0, 10.0, 1.0], [15.0, 10.0, 1.0]));
+        assert!(!segment_blocked(None, &[], &doors, [5.0, 10.0, 1.0], [15.0, 10.0, 1.0], None));
         // Degenerate (zero-length) segment: clear.
-        assert!(!segment_blocked(None, &walls, &doors, [5.0, 10.0, 1.0], [5.0, 10.0, 1.0]));
+        assert!(!segment_blocked(None, &walls, &doors, [5.0, 10.0, 1.0], [5.0, 10.0, 1.0], None));
     }
 
     #[test]
@@ -1332,14 +1433,123 @@ mod tests {
         // covers the downward ray at (x, y) = (10, 10).
         let soup = vec![0.0, 0.0, 4.0, 20.0, 0.0, 4.0, 10.0, 20.0, 4.0, 0.0, 0.0, 0.0];
         // Camera above (z = 8) → target below (z = 0): crosses the plane at z = 4.
-        assert!(segment_blocked(Some(&soup), &[], &HashMap::new(), [10.0, 10.0, 8.0], [10.0, 10.0, 0.0]));
+        assert!(segment_blocked(Some(&soup), &[], &HashMap::new(), [10.0, 10.0, 8.0], [10.0, 10.0, 0.0], None));
         // A closed-door slab (x 9..11, y 9..11, z 0..4) crossing the ray occludes.
         let mut doors = HashMap::new();
         doors.insert(1u32, Door { aabb: [9.0, 9.0, 0.0, 11.0, 11.0, 4.0], open: 0.0, goal: 0.0, last_now: -1.0 });
-        assert!(segment_blocked(None, &[], &doors, [10.0, 10.0, 8.0], [10.0, 10.0, 0.0]));
+        assert!(segment_blocked(None, &[], &doors, [10.0, 10.0, 8.0], [10.0, 10.0, 0.0], None));
         // The same door opened: clear.
         doors.insert(1u32, Door { aabb: [9.0, 9.0, 0.0, 11.0, 11.0, 4.0], open: 1.0, goal: 1.0, last_now: -1.0 });
-        assert!(!segment_blocked(None, &[], &doors, [10.0, 10.0, 8.0], [10.0, 10.0, 0.0]));
+        assert!(!segment_blocked(None, &[], &doors, [10.0, 10.0, 8.0], [10.0, 10.0, 0.0], None));
+    }
+
+    #[test]
+    fn segment_blocked_ignores_target_door_own_slab() {
+        // Regression: a door's pick anchor sits inside its own closed slab
+        // (grounded aabb, ~4 u tall). Without the ignore, the door's slab
+        // occludes the camera→anchor segment and a closed door can never be
+        // click-targeted in 3D.
+        let mut doors = HashMap::new();
+        doors.insert(7u32, Door { aabb: [9.0, 9.0, 0.0, 11.0, 11.0, 4.0], open: 0.0, goal: 0.0, last_now: -1.0 });
+        let cam = [10.0, 15.0, 3.0];
+        let anchor = [10.0, 10.0, 2.0]; // inside door 7's slab
+        assert!(segment_blocked(None, &[], &doors, cam, anchor, None));
+        assert!(!segment_blocked(None, &[], &doors, cam, anchor, Some(7)));
+        // A second closed door in the way still occludes the first.
+        doors.insert(8u32, Door { aabb: [9.0, 12.0, 0.0, 11.0, 14.0, 4.0], open: 0.0, goal: 0.0, last_now: -1.0 });
+        assert!(segment_blocked(None, &[], &doors, cam, anchor, Some(7)));
+    }
+
+    #[test]
+    fn door_swing_advances_toward_goal() {
+        let mut doors = HashMap::new();
+        doors.insert(
+            1,
+            Door { aabb: [0.0, 0.0, 0.0, 1.0, 1.0, 2.0], open: 0.0, goal: 1.0, last_now: -1.0 },
+        );
+        // The first advance only seeds the clock.
+        advance_doors(&mut doors, 100.0);
+        assert!((doors[&1].open).abs() < 1e-6);
+        // Half a swing later: halfway (linear ease, clamped).
+        advance_doors(&mut doors, 100.0 + DOOR_SWING_SECS / 2.0);
+        assert!((doors[&1].open - 0.5).abs() < 0.02, "mid-swing {}", doors[&1].open);
+        // Past the full duration: clamped exactly at the goal.
+        advance_doors(&mut doors, 100.0 + DOOR_SWING_SECS * 2.0);
+        assert!((doors[&1].open - 1.0).abs() < 1e-6);
+        // Re-advancing at the same timestamp adds nothing (idempotent).
+        advance_doors(&mut doors, 100.0 + DOOR_SWING_SECS * 2.0);
+        assert!((doors[&1].open - 1.0).abs() < 1e-6);
+        // Easing back toward a closed goal.
+        doors.get_mut(&1).unwrap().goal = 0.0;
+        advance_doors(&mut doors, 100.0 + DOOR_SWING_SECS * 3.5);
+        assert!((doors[&1].open).abs() < 1e-6, "closed again: {}", doors[&1].open);
+    }
+
+    /// The live door (mtable 0x09000202): its On/Off cycles both reference
+    /// swing anim 0x03000C20 — row 0 is the closed leaf, the last row the
+    /// fully open one (swung ~98 deg about local Z).
+    #[test]
+    fn door_swing_pose_samples_swing_anim() {
+        let Some(mut scene) = test_scene() else {
+            eprintln!("skipped: retail dats unavailable");
+            return;
+        };
+        let a = Actor {
+            guid: 1,
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            quat: [1.0, 0.0, 0.0, 0.0],
+            mtable_id: Some(0x09000202),
+            setup_id: Some(0x020019ff),
+            model_parts: None,
+            motion_cmd: MCMD_DOOR_OFF,
+            style: 0x3d,
+            glow: None,
+            scale: 1.0,
+        };
+        let (num_frames, num_parts) = {
+            let anim = door_swing_anim(&mut scene, &a).expect("swing anim");
+            (anim.num_frames, anim.num_parts)
+        };
+        assert!(num_frames >= 2, "swing anim has frames");
+
+        // open = 0: row 0 (the closed pose, near-identity part 0).
+        let closed = door_swing_pose(&mut scene, &a, 0.0).expect("closed pose");
+        assert_eq!(closed.part_frames.len(), num_parts);
+        let f0 = closed.part_frames[0];
+        assert!((f0.ox - 0.0).abs() < 1e-3, "closed ox {}", f0.ox);
+        assert!((f0.oy - 0.13).abs() < 0.01, "closed oy {}", f0.oy);
+        assert!((f0.oz - 1.18).abs() < 0.01, "closed oz {}", f0.oz);
+        assert!((f0.qw - 1.0).abs() < 1e-2, "closed qw {}", f0.qw);
+
+        // open = 1: the last row (the leaf swung ~98 deg: large -x/-y
+        // offset, |qz| ~= sin(49deg)).
+        let open = door_swing_pose(&mut scene, &a, 1.0).expect("open pose");
+        let f1 = open.part_frames[0];
+        assert!((f1.ox - (-0.955)).abs() < 0.05, "open ox {}", f1.ox);
+        assert!((f1.oy - (-0.95)).abs() < 0.05, "open oy {}", f1.oy);
+        assert!((f1.oz - 1.18).abs() < 0.05, "open oz {}", f1.oz);
+        assert!((f1.qz.abs() - 0.758).abs() < 0.05, "open qz {}", f1.qz);
+
+        // open = 0.5: strictly between the two rows.
+        let half = door_swing_pose(&mut scene, &a, 0.5).expect("half pose");
+        let fh = half.part_frames[0];
+        // The swing rows are not linear in x (the hinge geometry + the
+        // anim's own pacing), so only strict-between is a safe invariant.
+        assert!(
+            (fh.ox - f0.ox).abs() > 1e-3 && (fh.ox - f1.ox).abs() > 1e-3
+                && fh.ox < f0.ox && fh.ox > f1.ox,
+            "half ox {} strictly between closed {} and open {}",
+            fh.ox,
+            f0.ox,
+            f1.ox
+        );
+
+        // A motion command with no matching cycle (e.g. ready) still falls
+        // back to the first cycle's swing anim.
+        let a2 = Actor { motion_cmd: MCMD_READY, ..a.clone() };
+        assert!(door_swing_pose(&mut scene, &a2, 1.0).is_some());
     }
 
     #[test]

@@ -101,6 +101,14 @@ impl DatDatabase {
             // ObjectSize, not a contiguous block.
             let node = self.read_chain(at, DIR_NODE_SIZE)?;
             let count = le_u32(&node, 62 * 4) as usize;
+            // A node holds at most 61 entries (62 branches); more means a
+            // corrupt directory (the entry walk would read past the node).
+            if count > 61 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("DAT directory node claims {count} entries (max 61)"),
+                ));
+            }
             for i in 0..count {
                 let e = (62 + 1) * 4 + i * 24;
                 // BitFlags(4) ObjectId FileOffset FileSize Date Iteration
@@ -257,5 +265,49 @@ mod tests {
             assert!(PathBuf::from(&dir).join("client_portal.dat").is_file());
             assert!(PathBuf::from(&dir).join("client_cell_1.dat").is_file());
         }
+    }
+
+    /// A single-directory-node DAT file: header @ 0x140, the node in the
+    /// 0x400 sector (branches zero = leaf), one 0x800 sector per record.
+    fn minimal_dat(count: u32, records: &[(u32, Vec<u8>)]) -> Vec<u8> {
+        let mut f = vec![0u8; 0x1400 + records.len() * 0x800];
+        let u32 = |v: u32| v.to_le_bytes();
+        f[0x140..0x144].copy_from_slice(&u32(0x5442)); // FileType "BT"
+        f[0x144..0x148].copy_from_slice(&u32(4096)); // BlockSize
+        f[0x148..0x14c].copy_from_slice(&u32((0x1400 + records.len() * 0x800) as u32)); // FileSize
+        f[0x14c..0x150].copy_from_slice(&u32(2)); // DataSet = cell
+        f[0x160..0x164].copy_from_slice(&u32(0x400)); // BTree
+        // Node sector: u32 next = 0, then 62 branch slots + count + entries.
+        let node = 0x400 + 4;
+        f[node + 62 * 4..node + 62 * 4 + 4].copy_from_slice(&u32(count));
+        for (i, (id, rec)) in records.iter().enumerate() {
+            let e = node + 252 + i * 24;
+            f[e..e + 4].copy_from_slice(&u32(1)); // BitFlags
+            f[e + 4..e + 8].copy_from_slice(&u32(*id)); // ObjectId
+            f[e + 8..e + 12].copy_from_slice(&u32(0x1400 + i as u32 * 0x800));
+            f[e + 12..e + 16].copy_from_slice(&u32(rec.len() as u32));
+            f[e + 20..e + 24].copy_from_slice(&u32(1)); // Iteration
+            // Record sector: u32 next = 0, then the record bytes.
+            let s = 0x1400 + i * 0x800;
+            f[s + 4..s + 4 + rec.len()].copy_from_slice(rec);
+        }
+        f
+    }
+
+    fn write_tmp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        std::fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    /// A directory node claiming more than its 61 entry slots is corrupt
+    /// (regression: the entry walk read past the 1716-byte node and
+    /// panicked on the index).
+    #[test]
+    fn open_rejects_directory_node_count_over_61() {
+        let p = write_tmp("acgeo-dats-count", &minimal_dat(62, &[]));
+        let res = DatDatabase::open(&p);
+        let _ = std::fs::remove_file(&p);
+        assert!(res.is_err(), "corrupt node count must be an error");
     }
 }

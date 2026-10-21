@@ -2,8 +2,9 @@
 //! (knee + chest) against per-landblock static solids + closed-door slabs.
 //! Ported from `acclient-ts/src/collision.ts`.
 //!
-//! Coordinates: the client frame (the sim's raw x/y; the block geometry is
-//! `[0, BLOCK_LEN)` and is made periodic around the query point to match).
+//! Coordinates: the client frame (the sim's raw x/y, which can sit mid-step
+//! outside the `[0, BLOCK_LEN)` block frame after a boundary crossing). The
+//! block geometry is made periodic around the segment to match it.
 
 use std::collections::HashMap;
 
@@ -122,61 +123,75 @@ fn ray_blocked(
     by: f32,
     bz: f32,
 ) -> bool {
-    // Statics live in the [0, BLOCK_LEN) block frame; the client frame is
-    // periodic in it, so shift the geometry by the block multiple nearest
-    // the segment midpoint.
-    let mx = (ax + bx) / 2.0;
-    let my = (ay + by) / 2.0;
-    let ox = BLOCK_LEN * ((mx - BLOCK_LEN / 2.0) / BLOCK_LEN).round();
-    let oy = BLOCK_LEN * ((my - BLOCK_LEN / 2.0) / BLOCK_LEN).round();
+    // Statics and door slabs live in the [0, BLOCK_LEN) block frame; the
+    // client frame is periodic in it (RETAIL.md §3: the sim keeps its
+    // block's frame, so its position can sit mid-step outside
+    // [0, BLOCK_LEN) after a boundary crossing). Test every periodic copy
+    // whose bbox overlaps the segment's span — one for an in-block step,
+    // up to four when the step crosses a block corner. A midpoint-based
+    // single shift misses the wall/door on the far side of a boundary the
+    // step straddles.
     let (dx, dy, dz) = (bx - ax, by - ay, bz - az);
+    let (xlo, xhi) = (ax.min(bx), ax.max(bx));
+    let (ylo, yhi) = (ay.min(by), ay.max(by));
+    let (zlo, zhi) = (az.min(bz), az.max(bz));
     for s in statics {
         let b = s.bbox;
-        if ax.max(bx) < b[0] + ox || ax.min(bx) > b[3] + ox {
-            continue;
-        }
-        if ay.max(by) < b[1] + oy || ay.min(by) > b[4] + oy {
-            continue;
-        }
-        let zlo = az.min(bz);
-        let zhi = az.max(bz);
         if zhi < b[2] || zlo > b[5] {
             continue;
         }
+        // The copy multiples k whose [b0 + 192k, b3 + 192k] span can
+        // overlap [xlo, xhi] (the EPS keeps a grazing copy in range).
+        let kx0 = ((xlo - b[3]) / BLOCK_LEN - EPS).ceil() as i64;
+        let kx1 = ((xhi - b[0]) / BLOCK_LEN + EPS).floor() as i64;
+        let ky0 = ((ylo - b[4]) / BLOCK_LEN - EPS).ceil() as i64;
+        let ky1 = ((yhi - b[1]) / BLOCK_LEN + EPS).floor() as i64;
         let tris = &s.tris;
         let n = tris.len() / 9;
-        for i in 0..n {
-            let o = i * 9;
-            if seg_tri(
-                ax, ay, az, dx, dy, dz,
-                tris[o] + ox, tris[o + 1] + oy, tris[o + 2],
-                tris[o + 3] + ox, tris[o + 4] + oy, tris[o + 5],
-                tris[o + 6] + ox, tris[o + 7] + oy, tris[o + 8],
-            ) {
-                return true;
+        for kx in kx0..=kx1 {
+            let ox = (kx as f32) * BLOCK_LEN;
+            for ky in ky0..=ky1 {
+                let oy = (ky as f32) * BLOCK_LEN;
+                for i in 0..n {
+                    let o = i * 9;
+                    if seg_tri(
+                        ax, ay, az, dx, dy, dz,
+                        tris[o] + ox, tris[o + 1] + oy, tris[o + 2],
+                        tris[o + 3] + ox, tris[o + 4] + oy, tris[o + 5],
+                        tris[o + 6] + ox, tris[o + 7] + oy, tris[o + 8],
+                    ) {
+                        return true;
+                    }
+                }
             }
         }
     }
-    // Closed doors (same client frame as the player — no periodicity). A
-    // door stops movement until it has mostly swung clear.
+    // Closed doors (same client frame as the player; the slabs tile with
+    // the block like the statics). A door stops movement until it has
+    // mostly swung clear.
     for d in doors.values() {
         if d.open >= 0.9 {
             continue;
         }
         let b = d.aabb;
-        if ax.max(bx) < b[0] || ax.min(bx) > b[3] {
-            continue;
-        }
-        if ay.max(by) < b[1] || ay.min(by) > b[4] {
-            continue;
-        }
-        let zlo = az.min(bz);
-        let zhi = az.max(bz);
         if zhi < b[2] || zlo > b[5] {
             continue;
         }
-        if seg_box(ax, ay, az, dx, dy, dz, &b) {
-            return true;
+        let kx0 = ((xlo - b[3]) / BLOCK_LEN - EPS).ceil() as i64;
+        let kx1 = ((xhi - b[0]) / BLOCK_LEN + EPS).floor() as i64;
+        let ky0 = ((ylo - b[4]) / BLOCK_LEN - EPS).ceil() as i64;
+        let ky1 = ((yhi - b[1]) / BLOCK_LEN + EPS).floor() as i64;
+        for kx in kx0..=kx1 {
+            let ox = (kx as f32) * BLOCK_LEN;
+            for ky in ky0..=ky1 {
+                let oy = (ky as f32) * BLOCK_LEN;
+                if seg_box(
+                    ax, ay, az, dx, dy, dz,
+                    &[b[0] + ox, b[1] + oy, b[2], b[3] + ox, b[4] + oy, b[5]],
+                ) {
+                    return true;
+                }
+            }
         }
     }
     false
@@ -194,6 +209,14 @@ mod tests {
         Solid {
             tris,
             bbox: [10.0, 0.0, 0.0, 10.0, 20.0, 5.0],
+        }
+    }
+
+    /// A vertical wall triangle at x = `x`, spanning y 0..20, z 0..5.
+    fn wall_at_x(x: f32) -> Solid {
+        Solid {
+            tris: vec![x, 0.0, 0.0, x, 20.0, 0.0, x, 20.0, 5.0],
+            bbox: [x, 0.0, 0.0, x, 20.0, 5.0],
         }
     }
 
@@ -237,6 +260,12 @@ mod tests {
         // The same path with the door open does not block.
         doors.insert(1, crate::render::Door { aabb: [9.0, 18.0, 0.0, 11.0, 20.0, 4.0], open: 1.0, goal: 1.0, last_now: -1.0 });
         assert!(!blocked(&[], &doors, 5.0, 19.0, 0.0, 15.0, 19.0, 0.0));
+        // Mid-swing the door still blocks (the player can't clip through a
+        // leaf that is only half open); past the 0.9 threshold it doesn't.
+        doors.insert(1, crate::render::Door { aabb: [9.0, 18.0, 0.0, 11.0, 20.0, 4.0], open: 0.5, goal: 1.0, last_now: -1.0 });
+        assert!(blocked(&[], &doors, 5.0, 19.0, 0.0, 15.0, 19.0, 0.0));
+        doors.insert(1, crate::render::Door { aabb: [9.0, 18.0, 0.0, 11.0, 20.0, 4.0], open: 0.95, goal: 1.0, last_now: -1.0 });
+        assert!(!blocked(&[], &doors, 5.0, 19.0, 0.0, 15.0, 19.0, 0.0));
         // A path that avoids everything: it crosses the wall plane at
         // y = 0.5, below the triangle's rising hypotenuse (z < y/4).
         assert!(!blocked(&[wall], &doors, 5.0, 0.5, 0.0, 15.0, 0.5, 0.0));
@@ -248,5 +277,51 @@ mod tests {
         // The wall is at block-x 10; the client frame at x = 192+5 is the
         // same x, so the geometry must be shifted by +192.
         assert!(blocked(&[wall], &HashMap::new(), 197.0, 10.0, 0.0, 207.0, 10.0, 0.0));
+    }
+
+    #[test]
+    fn blocked_far_edge_wall_mid_step_past_block() {
+        // Regression: RETAIL.md §3 — the sim keeps its own block's frame,
+        // so a position can sit mid-step just past 192. A wall at the
+        // block's far edge (local x 191.9) is crossed by the step
+        // 191.85 -> 192.20 at its own (k=0) copy; the single periodic
+        // shift chosen from the segment midpoint sits a full block away
+        // and let the player through the wall.
+        let wall = wall_at_x(191.9);
+        assert!(blocked(&[wall], &HashMap::new(), 191.85, 10.0, 0.0, 192.2, 10.0, 0.0));
+    }
+
+    #[test]
+    fn blocked_near_edge_wall_mid_step_before_block() {
+        // Mirror of the far-edge case: a wall at the block's near edge
+        // (local x 0.1) crossed by the step -0.25 -> 0.2 (a position just
+        // past the 0 boundary).
+        let wall = wall_at_x(0.1);
+        assert!(blocked(&[wall], &HashMap::new(), -0.25, 10.0, 0.0, 0.2, 10.0, 0.0));
+    }
+
+    #[test]
+    fn blocked_diagonal_step_across_block_corner() {
+        // A step crossing both the x and y block boundaries (a block
+        // corner) still meets a wall just inside the far-far corner of the
+        // block (the plane y = 191.75, x 191.5..192.5).
+        let wall = Solid {
+            tris: vec![191.5, 191.75, 0.0, 192.5, 191.75, 0.0, 192.5, 191.75, 5.0],
+            bbox: [191.5, 191.75, 0.0, 192.5, 191.75, 5.0],
+        };
+        assert!(blocked(&[wall], &HashMap::new(), 191.7, 191.7, 0.0, 192.3, 192.3, 0.0));
+    }
+
+    #[test]
+    fn blocked_door_slab_tiles_across_block_boundaries() {
+        // Door slabs tile with the block like the statics: a near-edge
+        // slab blocks a step just past the far boundary (192.x), and a
+        // far-edge slab blocks a step just past the near boundary (-0.x).
+        let mut doors = HashMap::new();
+        doors.insert(1, crate::render::Door { aabb: [0.0, 9.0, 0.0, 2.0, 11.0, 4.0], open: 0.0, goal: 0.0, last_now: -1.0 });
+        assert!(blocked(&[], &doors, 191.95, 10.0, 0.0, 192.3, 10.0, 0.0));
+        let mut doors = HashMap::new();
+        doors.insert(1, crate::render::Door { aabb: [190.0, 9.0, 0.0, 192.0, 11.0, 4.0], open: 0.0, goal: 0.0, last_now: -1.0 });
+        assert!(blocked(&[], &doors, -0.3, 10.0, 0.0, -0.05, 10.0, 0.0));
     }
 }

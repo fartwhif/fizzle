@@ -896,11 +896,20 @@ pub fn parse_gfx_obj(
     }
 
     let vdata = read_vertex_positions(&mut r)?;
+    let vcount = vdata.pos.len() / 3;
     let key_to_slot = key_to_slot_map(&vdata.keys);
     let slot_of = |key: u32| -> i32 {
-        match &key_to_slot {
+        // A corrupt record may reference a key with no vertex; the TS
+        // client's `Vertices[(ushort)id]` throw is caught by its callers,
+        // which map to this parser's "drop the polygon" behavior.
+        let slot = match &key_to_slot {
             None => key as i32,
             Some(m) => m[key as usize],
+        };
+        if slot >= vcount as i32 {
+            -1
+        } else {
+            slot
         }
     };
 
@@ -1107,11 +1116,19 @@ pub fn parse_gfx_obj_physics(buf: &[u8], frame: Option<&Frame>) -> Option<GfxPhy
     if flags & 0x1 == 0 {
         return None;
     }
+    let vcount = vdata.pos.len() / 3;
     let key_to_slot = key_to_slot_map(&vdata.keys);
     let slot_of = |key: u32| -> i32 {
-        match &key_to_slot {
+        // Same corrupt-key guard as `parse_gfx_obj`: a key with no vertex
+        // drops the referencing polygon instead of indexing past `pos`.
+        let slot = match &key_to_slot {
             None => key as i32,
             Some(m) => m[key as usize],
+        };
+        if slot >= vcount as i32 {
+            -1
+        } else {
+            slot
         }
     };
 
@@ -1531,7 +1548,7 @@ pub fn parse_animation(buf: &[u8]) -> Option<Animation> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_texture_average;
+    use super::{parse_gfx_obj, parse_gfx_obj_physics, parse_texture_average};
 
     /// A DXT1 Texture record whose payload ends exactly on a block boundary:
     /// the 2-bit index decode must stay inside the final 8-byte block
@@ -1547,5 +1564,81 @@ mod tests {
         buf.extend(std::iter::repeat(0xA5u8).take(len));
         let avg = parse_texture_average(&buf, 512, 4096).expect("dxt1 average");
         assert_eq!(avg >> 24, 0xff);
+    }
+
+    /// A GfxObj record: 3 identity-keyed vertices + one drawing/physics
+    /// polygon with the given vertex ids (the third is out of range).
+    fn gfx_obj_buf(flags: u32, ids: [i16; 3]) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&0x01000001u32.to_le_bytes()); // Id
+        b.extend_from_slice(&flags.to_le_bytes());
+        b.push(1u8); // c_u32 nSurfaces
+        b.extend_from_slice(&0x08000001u32.to_le_bytes()); // Surface
+        b.extend_from_slice(&1i32.to_le_bytes()); // VertexType 1
+        b.extend_from_slice(&3u32.to_le_bytes()); // count
+        for key in 0..3u16 {
+            b.extend_from_slice(&key.to_le_bytes());
+            b.extend_from_slice(&0u16.to_le_bytes()); // numUVs
+            for _ in 0..3 {
+                b.extend_from_slice(&1.0f32.to_le_bytes()); // Origin
+            }
+            for _ in 0..3 {
+                b.extend_from_slice(&0f32.to_le_bytes()); // Normal
+            }
+        }
+        if flags & 0x1 != 0 {
+            b.push(1u8); // c_u32 nPoly
+            b.extend_from_slice(&0u16.to_le_bytes()); // poly key
+            gfx_polygon(&mut b, ids);
+            // Physics BSP: one solid leaf.
+            b.extend_from_slice(&0x4c454146u32.to_le_bytes()); // T_LEAF
+            b.extend_from_slice(&0i32.to_le_bytes()); // LeafIndex
+            b.extend_from_slice(&1i32.to_le_bytes()); // Solid
+            b.extend_from_slice(&[0u8; 16]); // Sphere
+            b.extend_from_slice(&0u32.to_le_bytes()); // polygon count
+        } else {
+            b.extend_from_slice(&[0u8; 12]); // SortCenter
+            b.push(1u8); // c_u32 nPoly
+            b.extend_from_slice(&0u16.to_le_bytes()); // poly key
+            gfx_polygon(&mut b, ids);
+        }
+        b
+    }
+
+    fn gfx_polygon(b: &mut Vec<u8>, ids: [i16; 3]) {
+        b.push(3u8); // num_pts
+        b.push(0u8); // stippling (no NOPOS/NOINEG)
+        b.extend_from_slice(&1i32.to_le_bytes()); // CullMode None
+        b.extend_from_slice(&0i16.to_le_bytes()); // pos_surface
+        b.extend_from_slice(&0i16.to_le_bytes()); // neg_surface
+        for &i in &ids {
+            b.extend_from_slice(&i.to_le_bytes());
+        }
+        b.extend_from_slice(&[0u8; 3]); // positive stipple/UV indices
+    }
+
+    /// A polygon key beyond the vertex array must be dropped, not index
+    /// past the positions (regression: a corrupt DAT with identity slot
+    /// keys panicked `vdata.pos[s * 3]` — the parsers' documented contract
+    /// is to return `None`/skip, mirroring the TS client's caught throw).
+    #[test]
+    fn gfx_obj_physics_out_of_range_vertex_key() {
+        let buf = gfx_obj_buf(0x1, [0, 1, 7]);
+        let phys = parse_gfx_obj_physics(&buf, None).expect("physics parses");
+        assert!(phys.tris.is_empty(), "polygon must be dropped");
+        assert!(phys.solid, "solid flag from the physics BSP leaf");
+    }
+
+    /// Mesh triangle indices must stay inside the vertex array (the
+    /// renderer indexes `pos[i * 3]` with them — an out-of-range key
+    /// panicked the render pass on a corrupt DAT).
+    #[test]
+    fn gfx_obj_mesh_vertex_indices_stay_in_range() {
+        let buf = gfx_obj_buf(0x2, [0, 1, 7]);
+        let mesh = parse_gfx_obj(&buf, |_| None, None).expect("mesh");
+        let n = mesh.pos.len() / 3;
+        for &i in &mesh.tris {
+            assert!((i as usize) < n, "tri index {i} beyond {n} vertices");
+        }
     }
 }

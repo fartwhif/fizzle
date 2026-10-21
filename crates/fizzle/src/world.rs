@@ -742,6 +742,24 @@ impl World {
         self.inventory.equipped.retain(|i| i.guid != guid);
     }
 
+    /// Remove an item from the main pack or the paper doll, returning it
+    /// (an equipped item comes off its slot).
+    #[must_use]
+    pub fn take_pack_or_equipped(&mut self, guid: u32) -> Option<ItemState> {
+        if let Some(pos) = self.inventory.pack.iter().position(|i| i.guid == guid) {
+            return Some(self.inventory.pack.remove(pos));
+        }
+        self.inventory
+            .equipped
+            .iter()
+            .position(|i| i.guid == guid)
+            .map(|pos| {
+                let mut item = self.inventory.equipped.remove(pos);
+                item.cur_loc = 0;
+                item
+            })
+    }
+
     /// Self health from a PlayerDescription event.
     pub fn set_vitals_from_description(&mut self, d: &messages::PlayerDescription) {
         let v = &d.vitals;

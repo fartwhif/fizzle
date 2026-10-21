@@ -190,15 +190,18 @@ impl World3D {
     /// in the block-local frame the renderer uses): the straight segment
     /// between them is clear of the current landblock's terrain, static
     /// geometry, and closed doors. Gates click-picking so an occluded entity
-    /// can't be targeted.
+    /// can't be targeted. `ignore_door` excludes one door's own slab from the
+    /// test: a door's pick anchor sits inside its closed slab, so without the
+    /// skip a closed door could never see itself.
     #[must_use]
-    pub fn line_of_sight(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+    pub fn line_of_sight(&self, from: [f32; 3], to: [f32; 3], ignore_door: Option<u32>) -> bool {
         !render::segment_blocked(
             self.scene.block_soup(self.cur_lb),
             &self.statics,
             &self.doors,
             from,
             to,
+            ignore_door,
         )
     }
 
@@ -231,6 +234,14 @@ impl World3D {
     /// Drop a door slab.
     pub fn remove_door(&mut self, guid: u32) {
         self.doors.remove(&guid);
+    }
+
+    /// Advance the door swings on the wall clock (frame-rate independent).
+    /// The app calls this every tick so a door's collision state never
+    /// depends on the 3D pane being drawn (the render pass advances the
+    /// same swings; the two are idempotent through `Door.last_now`).
+    pub fn tick(&mut self) {
+        render::advance_doors(&mut self.doors, render::now_secs());
     }
 
     /// The composed setup-model AABB for a closed door (the collision slab).
