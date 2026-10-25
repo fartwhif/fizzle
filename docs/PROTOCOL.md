@@ -560,7 +560,10 @@ Attribute/skill-credit failure → `Corrupt` (5); name taken → `NameInUse` (3)
   PlayerDescription (0x0013)`, `GameEvent CharacterTitle (0x0029)`, `GameEvent
   FriendsListUpdate (0x0021)`, then `PlayerCreate (0xF746)` + `ObjectCreate (0xF745)` for
   *yourself*, then your inventory/equipped `ObjectCreate`/`ViewContents`, a contract tracker
-  table, and several `ServerMessage (0xF7E0)` chat lines.
+  table, and several `ServerMessage (0xF7E0)` chat lines. Entry is not finished on the
+  server side until the client answers with C2S `GameAction LoginComplete` (`0x00A1`) —
+  the server holds the character in its `Teleporting` (portal-space) state until that
+  message arrives, and **every** in-session teleport re-arms it (§20.6).
 * **C2S `CharacterLogOff` `0xF653`** (no body, `WorldConnected`)
   (`CharacterHandler.cs:266-270`). The server plays a logout animation; after ~6 s
   (`Session.cs:152-153`) and once off the landblock it sends S2C `CharacterLogOff (0xF653,
@@ -689,11 +692,36 @@ u16 movementSeq
 [ u16 serverControlSeq ]       ; always present in this S2C writer
 u8  isAutonomous
 <Align to 4>
-u8  movementType               ; 0 Invalid, 1 MoveToObject, 2 MoveToPosition, 3 TurnToObject, 4 TurnToHeading
+u8  movementType               ; see below
 u8  motionFlags
 u16 currentStyle               ; MotionStance
-<union per movementType>        ; e.g. MoveToPosition carries a Position + sequences
+<union per movementType>
 ```
+
+The `movementType` values this server actually emits (`MotionTypes` in the
+server's `Physics/Managers/MoveToManager.cs`; **not** the retail
+`MovementData` enum — the retail values 1–4 never appear):
+
+| value | name            | body after `currentStyle` (all little-endian) |
+| ----- | --------------- | --------------------------------------------- |
+| `0`   | `General`       | (no approach body; style + motion commands only) |
+| `6`   | `MoveToObject`  | `u32 targetGuid` + `Origin` (32 B: `u32 cell` + 3×`f32`) + `MoveToParameters` (24 B: `u32 flags`, `f32 DistanceToObject`, `f32 MinDistance`, `f32 FailDistance`, `f32 Speed`, `f32 WalkRunThreshold`, `f32 DesiredHeading`) + `f32 RunRate` — 52 B |
+| `7`   | `MoveToPosition`| `Origin` (32 B) + `MoveToParameters` (16 B, no flags) — 48 B |
+| `8`   | `TurnToObject`  | `u32 targetGuid` + `f32 DesiredHeading` + `TurnToParameters` (8 B: `f32 Speed`, `f32 WalkRunThreshold`) — 20 B |
+
+A `MoveToObject` / `TurnToObject` **for the player's own guid** is the server's
+"approach" instruction: issued by `Use` on a vendor or container from beyond
+its use distance (`Player_Use.cs HandleActionUseItem` →
+`CreateMoveToChain(item, cb, useRadius = target.UseRadius ?? 0.6)`;
+`Player_Move2.cs GetMoveToParams` — `UseRadius` is PropertyFloat 54, delivered
+in the ObjectCreate weenie tail as flag 0x20, 4-byte LE float). Within the use
+distance the server sends a type-8 turn-only for the player (and the vendor's
+own rotate) and then the use fires. fizzle executes these client-side
+(§21.3): the local sim turns in place, then walks at walk speed along the
+straight line until within `DistanceToObject` (plus 0.25 u); user movement
+keys, teleports, or the window opening cancel it. A type-6/7/8 for any other
+guid is just that object's animation (e.g. the vendor rotating to face you)
+and is ignored for movement.
 
 ### 11.8 `ObjectDelete` `0xF747` (Smartbox) — `GameMessageDeleteObject.cs:8-13`
 ```
@@ -1276,13 +1304,39 @@ source (§20.7).
 **`PlayerTeleport` `0xF751`** (SmartboxQueue) — `GameMessagePlayerTeleport.cs`
 writes a **u32** teleport sequence (`Sequences.GetNextSequence(ObjectTeleport)`)
 then `Writer.Align()`. The new position is *not* in this packet; it arrives in the
-subsequent self `UpdatePosition` / `ObjectCreate`.
+subsequent self `UpdatePosition` / `ObjectCreate`. The u32 is a sequence, not a guid —
+the message is self-directed (there is no other-player variant).
+
+**The `Teleporting` gate (why `LoginComplete` must follow every teleport).** When the
+server teleports a player — `Player_Location.cs Teleport()` — it sets
+`Player.Teleporting = true` (the "portal space" state) and only clears it in
+`OnTeleportComplete()`, which is called **exclusively** from the C2S handler
+`GameActionLoginComplete` ("This is called when the client player exits portal space. It
+includes initial login, as well as portaling / teleporting"). While the flag is set, both
+movement actions are accepted off the wire but their position is silently dropped:
+
+```csharp
+// GameActionMoveToState.cs / GameActionAutonomousPosition.cs
+if (!session.Player.Teleporting)
+    session.Player.SetRequestedLocation(...);
+```
+
+No echo, no NAK, no log warning on this path — the motion is still broadcast
+(`BroadcastMovement`), so to other players the character appears to move while the
+server's `Location` (and therefore what logout saves) stays at the teleport drop. A
+client that omits the re-sent `LoginComplete` after an in-session teleport can walk
+anywhere and re-spawn at the teleport drop on its next login. The retail client re-sends
+it on every portal/teleport exit (ACCLIENT.md: `SendLoginCompleteNotification`); fizzle
+does so the moment its forced teleport snap is applied (§20.7).
 
 ### 20.7 Client correction policy
 
 `session.ts` (`_selfPositionUpdate`) classifies each self `UpdatePosition`:
 
-- **Teleport pending** (a `PlayerTeleport` was seen) → snap unconditionally.
+- **Teleport pending** (a `PlayerTeleport` was seen) → snap unconditionally, then re-send
+  C2S `GameAction LoginComplete` (`0x00A1`) — the only way to release the server's
+  `Teleporting` state (§20.6). Omitting it makes every subsequent position update a
+  silent no-op.
 - else if `|received − lastSent| > MOVE_SNAP_EPS` (**0.25 u**) → it is a **server
   correction** (collision/bounds/forced move) → snap the sim.
 - else → it is our own **echo** → ignore the position (adopt the landblock
@@ -1304,6 +1358,42 @@ All timings live in `session.ts`:
 `MoveToState` goes out on every motion-state change (an 8-bit input signature
 covering the six directions, run, and airborne). `AutonomousPosition` throttles
 to ~1/s while moving. Jump sets the airborne flag on the next `MoveToState`.
+
+### 20.9 Cell/position consistency (the login-spawn invariant)
+
+The server trusts the client's `(cell, x, y, z)` pair: at login it places the
+player's physics object exactly where the saved row (`biota_properties_position`,
+`position_Type = 1`) says. Placement is done in the saved **cell** — if the
+position is not placeable in that cell (stale cell after a boundary/structure
+crossing, an indoor position saved with a land cell, or a point with no ground,
+e.g. outdoors in a void block), the spawn fails and the server relocates the
+player to the lifestone (`WorldManager.DoPlayerEnterWorld` → `Teleport(fixLoc)`),
+then saves the lifestone position. Failure signature in the server log:
+`AddWorldObjectInternal: couldn't spawn …` followed by
+`WorldManager.DoPlayerEnterWorld: failed to spawn …, relocating to 0x860201AD …`.
+The relocation sticks: every later login reads the lifestone row.
+
+The client therefore maintains the pair itself (`fizzle: movement.rs
+maintain_cell`, every 50 ms tick):
+
+- **Land cell** (low 16 bits `< 0x100`): recompute from `(x, y)` with the retail
+  `adjust_to_outside` math (8×8 subcells of 24 u per 192 u block, including the
+  block carry when the position crosses a block edge).
+- **Env cell** (`≥ 0x100`, structures/indoors): enter when the position is
+  inside an env cell's region AABB, leave when it is outside (±0.25 u). The
+  region is the environment's drawing geometry transformed by the EnvCell's
+  placement frame — that frame can sit in an *unwrapped* coordinate space
+  (negative offsets), so containment is compared on the 192-unit ring
+  (`acgeo::region_contains_xy`), not a plain min/max test.
+
+Without the retail dats the sim degrades to the land-only recompute (flat
+plane, no env cells) — still better than sending a stale cell.
+
+World fact: the lifestone landblock `0x8602` is a non-land (water/void) block
+in the Dereth landmask — terrain height is 0 everywhere and only the lifestone
+env cell `0x860201AD` is placeable in it. Logging out outside the structure in
+that block saves an unplaceable position; the next login relocates to the
+lifestone by design.
 
 ## 21. Vendor (shop)
 
@@ -1421,6 +1511,44 @@ the `PlayerDescription` baseline) is added to the balance, and a whole-stack
 buy's removed stack (an `ObjectDelete`) is subtracted. An alt-currency vendor's
 count is not a player property: it is re-sent inside `ApproachVendor` after each
 buy (§21.1).
+
+### 21.6 Approach from distance and client-side auto-close
+
+`Use` on a vendor from beyond its use distance does **not** open the shop
+immediately. The server (`Player_Use.cs:176` → `Player_Move.cs:205` →
+`CreateMoveToChain(item, cb, useRadius = target.UseRadius ?? 0.6)`) issues an
+S2C `Motion` (§11.7) **approach** for the player's own guid — a
+`MoveToObject` (6) carrying the vendor's position and
+`DistanceToObject = UseRadius` when the player is outside the radius, or a
+`TurnToObject` (8) when already inside it. The server runs its own copy of the
+player's physics for the chain and, when its copy reaches the radius, the use
+fires: `Vendor.ActOnUse` rotates the vendor (a type-8 Motion *for the
+vendor's guid*) and streams `ApproachVendor`.
+
+fizzle executes the approach client-side in the local movement sim
+(`movement.rs approach_step`): turn in place until within 0.15 rad of the
+desired heading (dead-band ±0.075 rad), then walk **at walk speed** along the
+straight line until within `DistanceToObject + 0.25 u` — the retail client
+does not sprint up to a vendor. The walk is straight-line with no
+pathfinding: if a building wall blocks the line, the character stalls against
+the wall and the server's chain eventually fails (the shop never opens) — the
+same behavior as the retail client's straight walk. Any user movement key, a
+teleport, or the window opening cancels the approach.
+
+The shop window **auto-closes client-side** when the player moves away beyond
+the use distance — the server never sends a close (the vendor's 1.5 s
+`CheckClose` at `Vendor.cs:330` only fires the Close *emote*; containers have
+no server distance logic at all). UseRadius is the vendor's PropertyFloat 54,
+delivered in its `ObjectCreate` weenie tail (flag 0x20); all Arwic vendors are
+3.0. The close rule is: distance > `UseRadius + 0.5` **and** the client has
+moved at least 0.5 u farther than the closest it was since the window opened
+(the "open distance" baseline, set from the client's own position when
+`ApproachVendor` arrives). The baseline exists because the **server's** copy
+of the player position can lag the **client's** — observed: the server opened
+the shop while the client was 4.14 u out (server copy ≤ 3.0 u, radius 3.0) —
+so a plain `dist > radius` check would close the shop the instant it opens.
+The vendor auto-close abandons a pending buy/sell order without the
+confirm dialog (status flash: "too far — vendor closed").
 
 ## 22. Inventory (packs, equip, drop)
 
@@ -1682,6 +1810,22 @@ else a structure update). A chest **reset** empties it via `ObjectDelete` of
 the contents and re-locks it (`PublicUpdatePropertyBool` `0x02d2` `Locked =
 true`); the client does not parse `0x02d2`, so a reset under an open box just
 shows the box emptying (close it with `Esc`).
+
+### 24.4 Approach from distance and client-side auto-close
+
+`Use` on a chest / corpse from beyond its use distance behaves exactly like
+the vendor case (§21.6): the server issues an S2C `Motion` approach for the
+player's own guid (`MoveToObject` 6 outside the radius, `TurnToObject` 8
+inside), walks its own physics copy, and streams `ViewContents` (§24.2) when
+its copy is in range. fizzle walks the approach client-side and opens the
+loot window on `ViewContents`.
+
+The loot window auto-closes client-side when the player moves away beyond the
+use distance — containers have **no** server-side distance check at all (the
+vendor at least emotes; a chest will happily stay open server-side forever).
+Same close rule as the vendor: distance > `UseRadius + 0.5` and the client
+moved ≥ 0.5 u past its closest-since-open baseline. Containers without a
+UseRadius property fall back to the server's default of 0.6.
 
 ## 25. Combat (melee)
 

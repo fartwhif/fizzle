@@ -10,7 +10,7 @@
 //! This module stores only fizzle-side state (no `acproto` types), so the
 //! session layer (`app.rs`) maps the wire messages into these structures.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use acproto::codec::Vec3;
 use acproto::messages;
@@ -80,6 +80,10 @@ pub struct ItemState {
     pub motion_cmd: u32,
     pub physics_state: u32,
     pub is_vendor: bool,
+    /// `PropertyFloat` UseRadius (ObjectCreate 0x20 weenie flag): the
+    /// distance at which the object can be used — approach stop distance
+    /// and the vendor/loot window auto-close radius.
+    pub use_radius: Option<f32>,
 }
 
 /// A tracked world entity (radar blip + potential target).
@@ -110,6 +114,9 @@ pub struct Entity {
     pub style: u32,
     pub physics_state: u32,
     pub is_vendor: bool,
+    /// `PropertyFloat` UseRadius from the ObjectCreate (approach stop
+    /// distance / vendor/loot auto-close radius); `None` if absent.
+    pub use_radius: Option<f32>,
     /// Last time this entity was seen (for the far-cull pass).
     pub last_seen: Instant,
 }
@@ -203,6 +210,19 @@ pub struct Vitals {
     /// Vitae death-penalty multiplier (1.0 = no penalty), from the
     /// enchantment registry.
     pub vitae: Option<f32>,
+}
+
+/// One active enchantment on the self player, from the enchantment registry
+/// (PlayerDescription) and the update/remove game events. Keyed by
+/// (spell_id, layer); a full registry refresh replaces the whole list.
+#[derive(Clone, Debug)]
+pub struct Enchantment {
+    pub spell_id: u16,
+    pub layer: u16,
+    pub stat_mod_value: f32,
+    /// Wall-clock deadline for the local countdown; `None` = permanent
+    /// (non-positive server duration), which never expires locally.
+    pub expires_at: Option<Instant>,
 }
 
 /// The player's inventory (main pack + equipped + purse). Some fields are not yet
@@ -453,6 +473,8 @@ pub struct World {
     // NEW fizzle-side state:
     pub inventory: Inventory,
     pub skills: Skills,
+    /// Active enchantments on self (live list; the Enchantments widget).
+    pub enchantments: Vec<Enchantment>,
     pub social: Social,
     pub examine: Examine,
     pub vendor: VendorState,
@@ -504,6 +526,7 @@ impl World {
             style: 0,
             physics_state: 0,
             is_vendor: false,
+            use_radius: None,
             last_seen: Instant::now(),
         })
     }
@@ -546,6 +569,7 @@ impl World {
             e.motion_cmd = i.motion_cmd;
             e.physics_state = i.physics_state;
             e.is_vendor = i.is_vendor;
+            e.use_radius = i.use_radius;
         }
         e.last_seen = Instant::now();
     }
@@ -581,6 +605,21 @@ impl World {
             return;
         }
         let x = &mut self.examine;
+        // The Appraise carries only the profiles present for this object's
+        // class (flag-gated: a weapon carries WeaponProfile, never
+        // CreatureProfile). Reset the per-class facets to a blank slate so an
+        // absent profile can't bleed in from a previously examined object —
+        // retail parses a fresh flag-gated profile per appraise, so it never
+        // shows stale facets.
+        x.max_health = 0;
+        x.health = 0;
+        x.attrs = [0; 6];
+        x.vitals = [0; 3];
+        x.damage_min = 0;
+        x.damage_var = 0;
+        x.skill = 0;
+        x.resist = [0; 10];
+        x.armor_levels = [0; 8];
         x.guid = a.guid;
         x.item_type = self
             .entities
@@ -669,12 +708,54 @@ impl World {
             .find(|(k, _)| *k == acproto::messages::property_int64::TOTAL_EXPERIENCE)
             .map(|(_, v)| *v)
             .unwrap_or(0);
-        // Vitae death-penalty multiplier (spell 666 in the enchantment registry).
-        self.vitals.vitae = d
+        // Active enchantments (the registry is the authoritative full list);
+        // the Vitae death-penalty multiplier is spell 666.
+        self.enchantments = d
+            .enchantments
+            .iter()
+            .map(|e| Enchantment {
+                spell_id: e.spell_id,
+                layer: e.layer,
+                stat_mod_value: e.stat_mod_value,
+                expires_at: (e.duration > 0.0).then(|| Instant::now() + Duration::from_secs_f64(e.duration)),
+            })
+            .collect();
+        self.vitals.vitae = self
             .enchantments
             .iter()
             .find(|e| e.spell_id == 666)
             .map(|e| e.stat_mod_value);
+    }
+
+    /// One enchantment changed on self (0x02C2): add or replace the
+    /// (spell_id, layer) entry.
+    pub fn upsert_enchantment(&mut self, e: &messages::Enchantment) {
+        let entry = Enchantment {
+            spell_id: e.spell_id,
+            layer: e.layer,
+            stat_mod_value: e.stat_mod_value,
+            expires_at: (e.duration > 0.0).then(|| Instant::now() + Duration::from_secs_f64(e.duration)),
+        };
+        match self
+            .enchantments
+            .iter_mut()
+            .find(|x| x.spell_id == e.spell_id && x.layer == e.layer)
+        {
+            Some(slot) => *slot = entry,
+            None => self.enchantments.push(entry),
+        }
+    }
+
+    /// One enchantment removed from self (0x02C3), by (spell_id, layer).
+    pub fn remove_enchantment(&mut self, spell_id: u16, layer: u16) {
+        self.enchantments
+            .retain(|x| !(x.spell_id == spell_id && x.layer == layer));
+    }
+
+    /// Drop locally-expired enchantments (the countdown deadline has passed;
+    /// the server also sends a remove on natural expiry).
+    pub fn expire_enchantments(&mut self, now: Instant) {
+        self.enchantments.retain(|e| e.expires_at.map_or(true, |t| t > now));
     }
 
     /// Display name of a tracked entity (empty when unknown).
@@ -776,16 +857,16 @@ impl World {
         }
     }
 
-    /// Health from an UpdateHealth event (f32 0..1 of max). Applies to self,
-    /// or — when the guid is the current target — to the live target-health
-    /// display (driven by the `QueryHealth` heartbeat).
+    /// Health from an UpdateHealth event (f32 0..1 of max). Display only:
+    /// it updates the self/target health bar from the `QueryHealth`
+    /// heartbeat. It must NOT drive the death state — death is authoritative
+    /// (PlayerKilled / VitalUpdate HEALTH==0 / defender damage to 0).
     pub fn update_health_event(&mut self, guid: u32, pct: f32, target: Option<u32>) {
         let pct = pct.clamp(0.0, 1.0);
         if Some(guid) == self.self_guid {
             if let Some(max) = self.vitals.health_max {
                 let h = (pct * max as f32) as u32;
                 self.vitals.health = Some(h);
-                self.dead = h == 0;
             }
             return;
         }
@@ -939,5 +1020,88 @@ impl World {
             self.entities.remove(g);
         }
         removed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `UpdateHealth` (0x01C0) is a health-bar display heartbeat, not a death
+    /// signal. Even when the percentage-derived value rounds to 0 (low health
+    /// against a stale/small max), it must NOT mark the character dead. Real
+    /// death is authoritative: `VitalUpdate` HEALTH==0 (0x02E9) or PlayerKilled.
+    #[test]
+    fn update_health_pct_rounding_to_zero_does_not_kill() {
+        let mut w = World::new();
+        w.self_guid = Some(0x1000);
+        // Stale max: the server's real max is higher, but fizzle recorded a
+        // smaller one, so a low percentage rounds the derived health to 0.
+        w.vitals.health_max = Some(4);
+        w.vitals.health = Some(1);
+
+        // 5% of 4 = 0.2 -> 0. The old code set `dead = true` here.
+        w.update_health_event(0x1000, 0.05, None);
+
+        assert!(!w.dead, "UpdateHealth must not drive the death state");
+        assert_eq!(w.vitals.health, Some(0), "display health is still updated");
+    }
+
+    /// An authoritative `VitalUpdate` (0x02E9) HEALTH==0 DOES mark the char
+    /// dead, and a later HEALTH>0 (revive) clears it.
+    #[test]
+    fn vital_update_health_zero_is_authoritative_death() {
+        let mut w = World::new();
+        w.self_guid = Some(0x1000);
+        w.vitals.health_max = Some(100);
+        w.vitals.health = Some(10);
+        assert!(!w.dead);
+
+        w.set_vital(messages::vital::HEALTH, 0);
+        assert!(w.dead, "VitalUpdate HEALTH==0 must set dead");
+        assert_eq!(w.vitals.health, Some(0));
+
+        w.set_vital(messages::vital::HEALTH, 5);
+        assert!(!w.dead, "VitalUpdate HEALTH>0 (revive) must clear dead");
+        assert_eq!(w.vitals.health, Some(5));
+    }
+
+    /// The Appraise carries only the profiles present for the object's class
+    /// (flag-gated: a weapon carries WeaponProfile, never CreatureProfile).
+    /// Examining a weapon after a creature must not bleed the creature's
+    /// attrs/max health/vitals into the weapon's examine — retail parses a
+    /// fresh flag-gated profile per appraise, so absent facets stay blank.
+    #[test]
+    fn appraise_resets_absent_profile_facets() {
+        let mut w = World::new();
+        // Examine a creature (CreatureProfile present).
+        let mut c = messages::Appraise::default();
+        c.guid = 0x100;
+        c.success = true;
+        c.creature = Some(messages::AppraiseCreature {
+            max_health: 100,
+            health: 90,
+            attrs: [10, 20, 30, 40, 50, 60],
+            vitals: [11, 22, 33, 44],
+        });
+        w.apply_appraise(&c);
+        assert_eq!(w.examine.max_health, 100);
+        assert_eq!(w.examine.attrs, [10, 20, 30, 40, 50, 60]);
+
+        // Examine a weapon (no CreatureProfile): the creature facets must be
+        // gone, and the weapon's damage must be present.
+        let mut wn = messages::Appraise::default();
+        wn.guid = 0x200;
+        wn.success = true;
+        wn.weapon = Some(messages::AppraiseWeapon {
+            damage_min: 5,
+            damage_var: 3,
+            skill: 7,
+        });
+        w.apply_appraise(&wn);
+        assert_eq!(w.examine.max_health, 0, "weapon must not show a stale creature max health");
+        assert_eq!(w.examine.attrs, [0; 6], "weapon must not show stale creature attrs");
+        assert_eq!(w.examine.vitals, [0; 3], "weapon must not show stale creature vitals");
+        assert_eq!(w.examine.damage_min, 5, "weapon damage must be set");
     }
 }

@@ -56,7 +56,9 @@ const SLOTS: [char; 10] = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
 /// The inventory multi-widget index (paper doll + pack grid).
 const INV_WIDGET: usize = 11;
 /// The examine multi-widget index (right-click switches to it).
-const EXAMINE_WIDGET: usize = 13;
+const EXAMINE_WIDGET: usize = 14;
+/// The enchantments multi-widget index (live list of active enchantments).
+const ENCHANTMENTS_WIDGET: usize = 13;
 /// Paper-doll rows (0..4) at the top of the inventory widget.
 const DOLL_ROWS: u16 = 5;
 /// First pack-grid row inside the inventory widget (header on row 5).
@@ -75,6 +77,24 @@ const ITEM_TYPE_KEY: u32 = 0x4000;
 const ITEM_TYPE_GROUND: u32 = 32;
 /// POI markers are not plotted on the radar.
 const ITEM_TYPE_POI: u32 = 8192;
+/// Retail ItemType flags for static/animated world objects that render as
+/// setup models (matched by flag: a lifestone portal carries both).
+const ITEM_TYPE_PORTAL: u32 = 0x0001_0000;
+const ITEM_TYPE_LIFESTONE: u32 = 0x1000_0000;
+const ITEM_TYPE_SERVICE: u32 = 0x0010_0000;
+
+/// True when a world entity is a renderable, clickable "thing" (retail:
+/// nothing but terrain is untargetable). Matches the `build_actors` render
+/// filter and the 3D-click / radar pick whitelists, so anything you can see
+/// you can also click-target.
+fn is_world_entity(e: &Entity) -> bool {
+    e.is_player
+        || e.item_type == ITEM_TYPE_CREATURE
+        || e.item_type == ITEM_TYPE_GROUND
+        || e.item_type == ITEM_TYPE_DOOR
+        || e.item_type == ITEM_TYPE_CONTAINER
+        || e.item_type & (ITEM_TYPE_PORTAL | ITEM_TYPE_LIFESTONE | ITEM_TYPE_SERVICE) != 0
+}
 /// Retail motion command "Ready" (the idle stance).
 const MCMD_READY: u32 = 0x41000003;
 /// Motion-table style for non-player bodies (creature style 0x3d).
@@ -86,22 +106,26 @@ const CAM_UP: f32 = 6.5;
 const CAM_LOOK_UP: f32 = 1.5;
 const CAM_FOCAL_K: f32 = 1.0;
 const CAM_NEAR: f32 = 0.5;
+/// First-person (head) camera eye height (world units above the feet) — must
+/// match acgeo's render EYE_H so the pick framing matches the on-screen
+/// first-person view in a cramped room.
+const EYE_H: f32 = 2.2;
 
 /// The 3D actor glow-halo colors (self = gold, players = cyan, creatures = orange).
 const GLOW_SELF: u32 = 0xFFD24A;
 const GLOW_PLAYER: u32 = 0x8CD0FF;
 const GLOW_CREATURE: u32 = 0xFF965A;
 
-/// The 14 multi widgets (right column), in selector order.
-const WIDGET_LABELS: [&str; 14] = [
+/// The 15 multi widgets (right column), in selector order.
+const WIDGET_LABELS: [&str; 15] = [
     "Allegiance", "Fellowship", "Friends", "Squelch", "Spellbook", "Attributes", "Skills",
-    "Titles", "Contracts", "Map", "House", "Inventory", "You", "Examine",
+    "Titles", "Contracts", "Map", "House", "Inventory", "You", "Enchantments", "Examine",
 ];
 /// One-row widget selector: a Nerd Font `nf-md-*` (Material Design Icon)
 /// glyph per widget, in `WIDGET_LABELS` order. Code points are the
 /// `@mdi/font` values (Nerd Fonts v3 places MDI at 0xF0001-0xF1AF0); each
 /// measures as 1 cell so the row stays aligned.
-const WIDGET_GLYPHS: [char; 14] = [
+const WIDGET_GLYPHS: [char; 15] = [
     '\u{F023B}', // 0  Allegiance   flag
     '\u{F000E}', // 1  Fellowship   account-multiple
     '\u{F0899}', // 2  Friends      account-heart
@@ -115,7 +139,8 @@ const WIDGET_GLYPHS: [char; 14] = [
     '\u{F02DC}', // 10 House        home
     '\u{F0D2E}', // 11 Inventory    sack
     '\u{F0004}', // 12 You          account
-    '\u{F0349}', // 13 Examine      magnify
+    '\u{F1844}', // 13 Enchantments magic-staff
+    '\u{F0349}', // 14 Examine      magnify
 ];
 
 /// The paper-doll slots: (id, name, row, col, EquipMask bits). Structural
@@ -294,8 +319,8 @@ const HELP_LINES: [&str; 81] = [
     "  menu / list row       click moves, double-click activates (Enter)",
     "Widgets take no keys (only the menu and its submenus do):",
     "  Inventory: items are mouse-picked — click targets, right-click",
-    "    examines, drag to the paper doll equips, to a pack icon moves;",
-    "    drop the item on the ground to drop it",
+    "    examines, double-click or drag to the paper doll equips, to a pack",
+    "    icon moves; drop the item on the ground to drop it",
     "  Vendor: tabs Items / Buy / Sell — click a list item to target it,",
     "    ‹/› page it, the button row does the tab's actions (Items: Buy/",
     "    Add, Buy: Buy/Buy All/Remove/Clear, Sell: Add/Sell/Sell All/",
@@ -468,7 +493,7 @@ fn world_layout(h: u16, wcols: u16, widget_active: bool) -> Option<WLayout> {
     if body_h < 22 || wcols < 50 {
         return None;
     }
-    let right_w = 16.max(wcols / 3);
+    let right_w = 17.max(wcols / 3);
     let left_w = 20.max(wcols - right_w - 1);
     let right_x = left_w + 1;
     let radar_h = 9.max(h / 4);
@@ -586,7 +611,7 @@ fn draw_world(f: &mut Frame, app: &mut App) {
         lb.radar_h,
         area.width,
         lb.multi_y1,
-        WIDGET_LABELS[app.multi_sel.min(13)],
+        WIDGET_LABELS[app.multi_sel.min(14)],
         false,
     );
     draw_multi(f, app, lb, area.width);
@@ -835,7 +860,7 @@ fn draw_world3d(f: &mut Frame, app: &mut App, lb: WLayout) {
     let frame = app
         .world3d
         .as_mut()
-        .and_then(|w3d| w3d.render(lb_id, &cam, &actors, cols, rows, app.glow_actors, ret.as_ref(), app.reticle_animation));
+        .and_then(|w3d| w3d.render(lb_id, &cam, &actors, cols, rows, app.glow_actors, ret.as_ref(), app.reticle_animation, app.self_guid));
     let Some(frame) = frame else {
         note("(3d: nothing to render)");
         return;
@@ -903,12 +928,7 @@ fn build_actors(app: &App) -> Vec<Actor> {
             });
             continue;
         }
-        if !e.is_player
-            && e.item_type != ITEM_TYPE_CREATURE
-            && e.item_type != ITEM_TYPE_GROUND
-            && e.item_type != ITEM_TYPE_DOOR
-            && e.item_type != ITEM_TYPE_CONTAINER
-        {
+        if !is_world_entity(e) {
             continue;
         }
         let glow = if e.is_player {
@@ -938,6 +958,10 @@ fn build_actors(app: &App) -> Vec<Actor> {
             },
             style: if e.style != 0 || e.is_player {
                 e.style
+            } else if e.item_type & (ITEM_TYPE_PORTAL | ITEM_TYPE_LIFESTONE | ITEM_TYPE_SERVICE) != 0 {
+                // Fall back to the mtable's default animation (the portal /
+                // lifestone idle cycle), not the creature NonCombat style.
+                0
             } else {
                 STYLE_CREATURE
             },
@@ -1270,7 +1294,7 @@ fn draw_multi(f: &mut Frame, app: &App, lb: WLayout, wcols: u16) {
     let y1 = lb.multi_y1;
     let inner_w = (x1 - x0 - 2) as usize;
     let rows = (y1 - y0 - 2) as usize;
-    match app.multi_sel.min(13) {
+    match app.multi_sel.min(14) {
         0 => draw_allegiance(f, app, x0, y0, rows, inner_w),
         1 => draw_fellowship(f, app, x0, y0, rows, inner_w),
         2 => draw_friends(f, app, x0, y0, rows, inner_w),
@@ -1284,6 +1308,7 @@ fn draw_multi(f: &mut Frame, app: &App, lb: WLayout, wcols: u16) {
         10 => draw_house(f, app, x0, y0, rows, inner_w),
         11 => draw_inventory(f, app, x0, y0, rows, inner_w),
         12 => draw_you(f, app, x0, y0, rows, inner_w),
+        13 => draw_enchantments(f, app, x0, y0, rows, inner_w),
         _ => draw_examine(f, app, x0, y0, rows, inner_w),
     }
 }
@@ -1415,6 +1440,77 @@ fn draw_spellbook(f: &mut Frame, app: &App, x0: u16, y0: u16, rows: usize, inner
         inner_w,
         rows.saturating_sub(1),
         &format!("slot {} tab {}/8 | p add m rm v forget", SLOTS[sk.slot.min(9)], sk.tab + 1),
+        dark(app),
+    );
+}
+
+/// Compact remaining-time: `1h5m`, `55m`, or `45s` (whole seconds).
+#[must_use]
+fn format_duration(secs: f64) -> String {
+    let s = secs.max(0.0) as u64;
+    let h = s / 3600;
+    let m = (s % 3600) / 60;
+    match (h, m) {
+        (h, m) if h > 0 => format!("{h}h{m}m"),
+        (_, m) if m > 0 => format!("{m}m"),
+        _ => format!("{s}s"),
+    }
+}
+
+fn draw_enchantments(f: &mut Frame, app: &App, x0: u16, y0: u16, rows: usize, inner_w: usize) {
+    let ench = &app.world.enchantments;
+    if ench.is_empty() {
+        mnote(f, app, x0, y0, rows, inner_w, 0, "no active enchantments");
+    } else {
+        mrow(f, app, x0, y0, rows, inner_w, 0, &format!("active {}", ench.len()), normal(app));
+        // Resolve the friendly name + remaining time, sorted by name.
+        let now = Instant::now();
+        let mut list: Vec<(String, String)> = ench
+            .iter()
+            .map(|e| {
+                let name = match crate::spells::spell_name(e.spell_id) {
+                    Some(n) => n.to_string(),
+                    None => format!("#{}", e.spell_id),
+                };
+                let rem = match e.expires_at {
+                    Some(t) => format_duration(t.saturating_duration_since(now).as_secs_f64()),
+                    None => "perm".to_string(),
+                };
+                (name, rem)
+            })
+            .collect();
+        list.sort();
+        for (i, (name, time)) in list.iter().enumerate() {
+            if i < app.list_scroll {
+                continue;
+            }
+            let row = 1 + (i - app.list_scroll);
+            if row >= rows.saturating_sub(1) {
+                break;
+            }
+            let name_w = inner_w.saturating_sub(time.len() + 1);
+            mrow(
+                f,
+                app,
+                x0,
+                y0,
+                rows,
+                inner_w,
+                row,
+                &format!("{} {}", trunc(name, name_w), time),
+                normal(app),
+            );
+        }
+    }
+    mrow(
+        f,
+        app,
+        x0,
+        y0,
+        rows,
+        inner_w,
+        rows.saturating_sub(1),
+        "spell name  time left | wheel scroll",
         dark(app),
     );
 }
@@ -2017,8 +2113,8 @@ fn selector_start(x0: u16, x1: u16, n: usize) -> u16 {
 /// The small selector: one Nerd Font icon per multi widget on the multi
 /// box's bottom border row, the current one reversed.
 fn draw_selector(f: &mut Frame, app: &App, lb: WLayout, wcols: u16) {
-    let start = selector_start(lb.right_x, wcols, 14);
-    for i in 0..14 {
+    let start = selector_start(lb.right_x, wcols, 15);
+    for i in 0..15 {
         put(
             f,
             lb.multi_y1,
@@ -3427,6 +3523,33 @@ fn camera_basis(cam: &Camera, cols: usize, rows: usize, back: f32) -> Basis {
     }
 }
 
+/// The first-person (head) camera basis (ported from acgeo's render math to
+/// match it exactly): the eye at `EYE_H` above the feet, looking level in the
+/// facing direction. Used for click picking when the renderer is in
+/// first-person (a cramped room), so the pick projection matches the view.
+fn camera_basis_first_person(cam: &Camera, cols: usize, rows: usize) -> Basis {
+    let h = cam.heading;
+    let (fx, fy) = (h.sin(), h.cos());
+    let cam_z = cam.z + EYE_H;
+    let (vfx, vfy, vfz) = (fx, fy, 0.0);
+    let fl = (vfx * vfx + vfy * vfy + vfz * vfz).sqrt();
+    let (vfx, vfy, vfz) = if fl < f32::EPSILON {
+        (0.0, 1.0, 0.0)
+    } else {
+        (vfx / fl, vfy / fl, vfz / fl)
+    };
+    let (rx, ry) = (vfy, -vfx);
+    let (ux, uy, uz) = (ry * vfz, -rx * vfz, rx * vfy - ry * vfx);
+    Basis {
+        cam: [cam.x, cam.y, cam_z],
+        f: [vfx, vfy, vfz],
+        r: [rx, ry, 0.0],
+        u: [ux, uy, uz],
+        focal: rows as f32 * CAM_FOCAL_K,
+        sc: [(cols - 1) as f32 / 2.0, (rows - 1) as f32 / 2.0],
+    }
+}
+
 /// Project a world point into the pane (screen cell), `None` behind the
 /// near plane. Returns `(sx, sy, zc)` with `zc` the forward depth (the
 /// distance along the view ray the renderer depth-tests with).
@@ -3462,6 +3585,8 @@ fn entity_half_extents(e: &Entity) -> (f32, f32) {
         (1.3, 2.0) // a door slab
     } else if e.item_type == ITEM_TYPE_GROUND || e.item_type == ITEM_TYPE_CONTAINER {
         (0.7, 0.7) // a ground item / container
+    } else if e.item_type & (ITEM_TYPE_PORTAL | ITEM_TYPE_LIFESTONE | ITEM_TYPE_SERVICE) != 0 {
+        (0.9, 2.0) // a portal / lifestone monolith
     } else {
         (0.9, 1.4) // a humanoid
     }
@@ -3488,27 +3613,25 @@ fn pick_world3d(app: &App, lb: WLayout, r: u16, c: u16) -> Option<u32> {
         z: sp.z,
         heading,
     };
-    // Use the renderer's live camera distance (it tracks the wheel zoom), so
-    // the pick projection lines up with what's on screen — not the default.
-    let back = app
-        .world3d
-        .as_ref()
-        .map(|w| w.camera_back())
-        .unwrap_or(CAM_BACK);
-    let basis = camera_basis(&cam, cols, rows, back);
+    let w3d = app.world3d.as_ref();
+    // Match the renderer's live camera — it tracks the wheel zoom and drops
+    // to first-person in a cramped room — so the pick projection lines up
+    // with what's on screen, not the default third-person framing.
+    let basis = if w3d.is_some_and(|w| w.camera_first_person()) {
+        camera_basis_first_person(&cam, cols, rows)
+    } else {
+        let back = w3d.map(|w| w.camera_back()).unwrap_or(CAM_BACK);
+        camera_basis(&cam, cols, rows, back)
+    };
     let px = (c - 1) as f32;
     let py = (r - lb.world_y0 - 1) as f32;
-    let w3d = app.world3d.as_ref();
     // (guid, depth) of the nearest body box that covers the click.
     let mut best: Option<(u32, f32)> = None;
     for e in app.world.entities.values() {
         if Some(e.guid) == app.self_guid {
             continue;
         }
-        let pickable = e.is_player
-            || e.item_type == ITEM_TYPE_CREATURE
-            || e.item_type == ITEM_TYPE_GROUND
-            || e.item_type == ITEM_TYPE_DOOR;
+        let pickable = is_world_entity(e);
         if !pickable {
             continue;
         }
@@ -3578,10 +3701,7 @@ fn pick_tactical(app: &App, lb: WLayout, r: u16, c: u16) -> Option<u32> {
         let Some(e) = app.world.entities.get(guid) else {
             continue;
         };
-        let pickable = e.is_player
-            || e.item_type == ITEM_TYPE_CREATURE
-            || e.item_type == ITEM_TYPE_GROUND
-            || e.item_type == ITEM_TYPE_DOOR;
+        let pickable = is_world_entity(e);
         if !pickable {
             continue;
         }
@@ -3631,13 +3751,32 @@ fn left_down(app: &mut App, area: Rect, r: u16, c: u16) {
     let Some(lb) = world_layout(area.height, area.width, widget_active(app)) else {
         return;
     };
-    // Inventory item: start a drag + target it.
+    // Inventory item: start a drag + target it. A double click on a pack
+    // item equips it at the first free valid location (the retail quick
+    // action); an already-worn doll item is left alone.
     if let Some((guid, slot)) = inv_item_at(app, lb, r, c, area.width) {
         app.drag = Some(guid);
         app.set_item_target(guid, TARGET_ITEM_PACK);
         match slot {
             InvSlot::Pack(i) => app.world.inventory.sel = i,
             InvSlot::Doll(i) => app.world.inventory.doll_sel = i,
+        }
+        let now = Instant::now();
+        let dbl = is_double_click(app, now, (r, c));
+        app.last_click_at = Some(now);
+        app.last_click_pos = Some((r, c));
+        if dbl && matches!(slot, InvSlot::Pack(_)) {
+            let name = item_name(app, guid);
+            let valid = find_item(app, guid).is_some_and(|it| it.valid_locs != 0);
+            if let Some(loc) = find_item(app, guid).and_then(|it| equip_loc_for(app, it)) {
+                app.equip_item(guid, loc as i32);
+                app.world.flash =
+                    Some(format!("equipping {name} ({})", loc_name(loc)));
+            } else if valid {
+                app.world.flash = Some("no free wear location".into());
+            } else {
+                app.world.flash = Some("cannot be worn".into());
+            }
         }
         return;
     }
@@ -3686,13 +3825,20 @@ fn left_down(app: &mut App, area: Rect, r: u16, c: u16) {
             if dbl {
                 app.use_target();
             }
+        } else {
+            // Empty space (nothing under the click): deselect the current
+            // target (retail: a click on nothing sends QueryHealth(0)).
+            // Reset the double-click timer so this click breaks a sequence.
+            app.deselect_target();
+            app.last_click_at = Some(Instant::now());
+            app.last_click_pos = Some((r, c));
         }
         return;
     }
-    // Widget selector row (the 14 glyphs).
+    // Widget selector row (the 15 glyphs).
     if r == lb.multi_y1 && c >= lb.right_x {
-        let i = (c as usize).saturating_sub(selector_start(lb.right_x, area.width, 14) as usize);
-        if i < 14 && i != app.multi_sel {
+        let i = (c as usize).saturating_sub(selector_start(lb.right_x, area.width, 15) as usize);
+        if i < 15 && i != app.multi_sel {
             app.open_widget(i);
         }
         return;
@@ -3930,6 +4076,27 @@ fn wheel(app: &mut App, area: Rect, r: u16, c: u16, up: bool) {
             return;
         }
     }
+    // Enchantments: the wheel scrolls the live list (the multi-box shows only
+    // a few rows, but /buff can add ~90).
+    if app.multi_sel == ENCHANTMENTS_WIDGET {
+        let inner_x0 = lb.right_x + 1;
+        let inner_y0 = lb.radar_h + 1;
+        if r < inner_y0 || c < inner_x0 {
+            return;
+        }
+        let rel_r = (r - inner_y0) as usize;
+        let rel_c = (c - inner_x0) as usize;
+        let inner_w = (area.width - lb.right_x - 2) as usize;
+        let rows_total = (lb.multi_y1 - lb.radar_h - 2) as usize;
+        if rel_r >= rows_total || rel_c >= inner_w {
+            return;
+        }
+        let visible = rows_total.saturating_sub(2); // header + hint rows
+        let n = app.world.enchantments.len();
+        app.list_scroll =
+            ((app.list_scroll as isize) + d).max(0).min(n.saturating_sub(visible) as isize) as usize;
+        return;
+    }
     if app.multi_sel != INV_WIDGET {
         return;
     }
@@ -3980,7 +4147,7 @@ fn view_press(app: &mut App, view: MenuView, r: u16, c: u16, h: u16, w: u16) {
     let n = match view {
         MenuView::Menu => MENU_ITEMS.len(),
         MenuView::Themes => 4,
-        MenuView::Widgets => 14,
+        MenuView::Widgets => 15,
         MenuView::WorldView => 2,
         MenuView::Help => 0,
     };
@@ -3996,7 +4163,7 @@ fn view_press(app: &mut App, view: MenuView, r: u16, c: u16, h: u16, w: u16) {
         match view {
             MenuView::Menu => app.menu_sel = i.min(MENU_ITEMS.len() - 1),
             MenuView::Themes => app.theme_sel = i.min(3),
-            MenuView::Widgets => app.widget_sel = i.min(13),
+            MenuView::Widgets => app.widget_sel = i.min(14),
             MenuView::WorldView => app.worldview_sel = i.min(1),
             MenuView::Help => {}
         }
@@ -4011,7 +4178,7 @@ fn view_press(app: &mut App, view: MenuView, r: u16, c: u16, h: u16, w: u16) {
                 app.menu_view = Some(MenuView::Themes);
             }
             1 => {
-                app.widget_sel = app.multi_sel.min(13);
+                app.widget_sel = app.multi_sel.min(14);
                 app.menu_view = Some(MenuView::Widgets);
             }
             2 => {
@@ -4446,11 +4613,26 @@ fn draw_center_box(f: &mut Frame, app: &App, title: &str, lines: &[&str], title_
 
 #[cfg(test)]
 mod tests {
-    use super::{item_glyph, mouse, trade_item_at, App, MenuView, Phase, Rect, WLayout, ITEM_TYPES, WIDGET_GLYPHS};
+    use super::{
+        item_glyph, inv_item_at, mouse, trade_item_at, world_layout, App, InvSlot, INV_WIDGET,
+        ItemState, MenuView, Phase, Rect, WLayout, ITEM_TYPES, WIDGET_GLYPHS,
+    };
     use ratatui::buffer::Buffer;
     use ratatui::style::Style;
 
-    /// Every icon: the 14 widget-selector glyphs + the 31 item-type glyphs.
+    #[test]
+    fn format_duration_compacts() {
+        assert_eq!(super::format_duration(0.0), "0s");
+        assert_eq!(super::format_duration(45.0), "45s");
+        assert_eq!(super::format_duration(59.9), "59s");
+        assert_eq!(super::format_duration(60.0), "1m");
+        assert_eq!(super::format_duration(3300.0), "55m");
+        assert_eq!(super::format_duration(3600.0), "1h0m");
+        assert_eq!(super::format_duration(7500.0), "2h5m");
+        assert_eq!(super::format_duration(-5.0), "0s");
+    }
+
+    /// Every icon: the 15 widget-selector glyphs + the 31 item-type glyphs.
     fn all_icons() -> Vec<char> {
         let mut v = WIDGET_GLYPHS.to_vec();
         v.extend(ITEM_TYPES.iter().map(|&(_, g, _)| g));
@@ -4604,5 +4786,173 @@ mod tests {
             panic!("the glyph at the last inner column (col {col}) must be pickable");
         };
         assert_eq!((guid, i), (116, 16));
+    }
+
+    /// Two left presses on the same pack cell within the double-click
+    /// window: the first only targets/selects, the second equips.
+    fn double_click_pack_item(app: &mut App, area: Rect, lb: WLayout, guid: u32) {
+        let cell = (0..area.height)
+            .flat_map(|r| (0..area.width).map(move |c| (r, c)))
+            .find(|&(r, c)| inv_item_at(app, lb, r, c, area.width) == Some((guid, InvSlot::Pack(0))))
+            .unwrap_or_else(|| panic!("pack item {guid} must be mouse-pickable"));
+        let ev = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: cell.1,
+            row: cell.0,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        mouse(app, area, &ev);
+        mouse(app, area, &ev);
+    }
+
+    /// A double click on a pack item equips it at the first free valid
+    /// location (retail quick action): one click only targets, the second
+    /// moves the item from the pack to the paper doll at that location.
+    #[test]
+    fn double_click_equips_a_pack_item() {
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        app.phase = Phase::InWorld;
+        app.multi_sel = INV_WIDGET;
+        app.world.inventory.pack.push(ItemState {
+            guid: 42,
+            name: "Shortsword".into(),
+            valid_locs: 0x400,
+            ..Default::default()
+        });
+        let area = Rect::new(0, 0, 100, 30);
+        let lb = world_layout(area.height, area.width, false).unwrap();
+        let cell = (0..area.height)
+            .flat_map(|r| (0..area.width).map(move |c| (r, c)))
+            .find(|&(r, c)| inv_item_at(&app, lb, r, c, area.width) == Some((42, InvSlot::Pack(0))))
+            .unwrap_or_else(|| panic!("the pack item must be mouse-pickable"));
+        let ev = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: cell.1,
+            row: cell.0,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        mouse(&mut app, area, &ev);
+        assert!(
+            app.world.inventory.pack.iter().any(|i| i.guid == 42),
+            "a single click must not equip"
+        );
+        mouse(&mut app, area, &ev);
+        let worn = app
+            .world
+            .inventory
+            .equipped
+            .iter()
+            .find(|i| i.guid == 42)
+            .expect("the double click must equip the item");
+        assert_eq!(worn.cur_loc, 0x400, "equipped at the item's free valid location");
+        assert!(
+            !app.world.inventory.pack.iter().any(|i| i.guid == 42),
+            "the equipped item must leave the pack"
+        );
+    }
+
+    /// A double click on an item whose only valid location is already worn
+    /// leaves it in the pack and flashes "no free wear location".
+    #[test]
+    fn double_click_with_no_free_slot_keeps_the_item() {
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        app.phase = Phase::InWorld;
+        app.multi_sel = INV_WIDGET;
+        app.world.inventory.equipped.push(ItemState {
+            guid: 7,
+            name: "Worn sword".into(),
+            cur_loc: 0x400,
+            valid_locs: 0x400,
+            ..Default::default()
+        });
+        app.world.inventory.pack.push(ItemState {
+            guid: 42,
+            name: "Second sword".into(),
+            valid_locs: 0x400,
+            ..Default::default()
+        });
+        let area = Rect::new(0, 0, 100, 30);
+        let lb = world_layout(area.height, area.width, false).unwrap();
+        double_click_pack_item(&mut app, area, lb, 42);
+        assert!(
+            app.world.inventory.pack.iter().any(|i| i.guid == 42),
+            "the item must stay in the pack"
+        );
+        assert!(
+            !app.world.inventory.equipped.iter().any(|i| i.guid == 42),
+            "an occupied slot must not be double-worn"
+        );
+        assert_eq!(app.world.flash.as_deref(), Some("no free wear location"));
+    }
+
+    /// A double click on an item with no valid wear locations at all
+    /// leaves it in the pack and flashes "cannot be worn".
+    #[test]
+    fn double_click_on_unwearable_item_keeps_the_item() {
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        app.phase = Phase::InWorld;
+        app.multi_sel = INV_WIDGET;
+        app.world.inventory.pack.push(ItemState {
+            guid: 42,
+            name: "Spell Tomes".into(),
+            ..Default::default()
+        });
+        let area = Rect::new(0, 0, 100, 30);
+        let lb = world_layout(area.height, area.width, false).unwrap();
+        double_click_pack_item(&mut app, area, lb, 42);
+        assert!(app.world.inventory.pack.iter().any(|i| i.guid == 42));
+        assert_eq!(app.world.flash.as_deref(), Some("cannot be worn"));
+    }
+
+    /// Retail parity: every visible world "thing" (creature, ground item, door,
+    /// container/chest, portal, service point, lifestone, or a player) is a
+    /// valid click-target; only terrain / non-objects (and POI markers) are
+    /// not. This is the shared pick whitelist (3D-click and radar).
+    #[test]
+    fn every_world_object_is_a_valid_target() {
+        use crate::world::Entity;
+        use std::time::Instant;
+        let ent = |item_type: u32| Entity {
+            guid: 1,
+            name: None,
+            cell: 0,
+            pos: acproto::codec::Vec3 { x: 0.0, y: 0.0, z: 0.0 },
+            rot: [1.0, 0.0, 0.0, 0.0],
+            is_player: false,
+            health: None,
+            health_max: None,
+            mana: None,
+            mana_max: None,
+            item_type,
+            setup_id: None,
+            mtable_id: None,
+            model_parts: None,
+            motion_cmd: 0,
+            style: 0,
+            physics_state: 0,
+            is_vendor: false,
+            use_radius: None,
+            last_seen: Instant::now(),
+        };
+        for item_type in [
+            super::ITEM_TYPE_CREATURE,
+            super::ITEM_TYPE_GROUND,
+            super::ITEM_TYPE_DOOR,
+            super::ITEM_TYPE_CONTAINER,
+            super::ITEM_TYPE_PORTAL,
+            super::ITEM_TYPE_SERVICE,
+            super::ITEM_TYPE_LIFESTONE,
+        ] {
+            assert!(
+                super::is_world_entity(&ent(item_type)),
+                "type {item_type:#x} must be a valid target"
+            );
+        }
+        let mut player = ent(0);
+        player.is_player = true;
+        assert!(super::is_world_entity(&player), "a player must be targetable");
+        // Terrain / non-objects and POI markers are not targetable.
+        assert!(!super::is_world_entity(&ent(0)));
+        assert!(!super::is_world_entity(&ent(super::ITEM_TYPE_POI)));
     }
 }

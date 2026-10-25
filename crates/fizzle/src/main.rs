@@ -5,6 +5,7 @@ mod movement;
 mod net;
 mod plain;
 mod profiles;
+mod spells;
 mod themes;
 mod ui;
 mod world;
@@ -56,7 +57,6 @@ struct Cli {
     /// Character to auto-enter once the character list arrives
     #[arg(long)]
     character: Option<String>,
-
     /// UI mode: `tui` (default, ratatui console) or `plain` (stdout, no TUI)
     #[arg(long, default_value = "tui")]
     ui: String,
@@ -201,3 +201,4 @@ fn run_event_loop(app: &mut App) -> anyhow::Result<()> {
     terminal.show_cursor()?;
     result
 }
+

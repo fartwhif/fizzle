@@ -17,6 +17,14 @@ pub mod hold_key {
     pub const NONE: u32 = 1;
     pub const RUN: u32 = 2;
 }
+/// `MovementTypes` (ACE.Entity.Enum) — the S2C Motion body discriminator
+/// (`movement_type` byte, offset 12).
+pub mod movement_type {
+    pub const GENERAL: u8 = 0;
+    pub const MOVE_TO_OBJECT: u8 = 6;
+    pub const MOVE_TO_POSITION: u8 = 7;
+    pub const TURN_TO_OBJECT: u8 = 8;
+}
 
 pub mod command {
     pub const READY: u32 = 0x4100_0003;
@@ -170,6 +178,28 @@ pub struct MotionEvent {
     /// A door's open/close rides the forward command (`command::DOOR_ON` /
     /// `command::DOOR_OFF`).
     pub commands: Vec<u32>,
+    /// Present for movement types 6/7/8 (server-issued approach, e.g. the
+    /// walk-up before a vendor/container window opens); `None` otherwise
+    /// or when the body is too short.
+    pub approach: Option<ApproachMotion>,
+}
+
+/// The body of a server-issued approach Motion (`MovementTypes` 6/7/8):
+/// the client turns toward the target and walks to it until within
+/// `distance` (the object's `UseRadius`; `MoveToParameters` defaults).
+#[derive(Clone, Copy, Debug)]
+pub struct ApproachMotion {
+    /// `movement_type::MOVE_TO_OBJECT` / `MOVE_TO_POSITION` / `TURN_TO_OBJECT`.
+    pub movement_type: u8,
+    /// The target's guid (`0` for `MOVE_TO_POSITION`).
+    pub target: u32,
+    /// The target's cell, block-local frame (`0` for `TURN_TO_OBJECT`).
+    pub cell: u32,
+    /// The target's block-local position.
+    pub pos: Vec3,
+    /// MoveTo*: stop when this far from the target (DistanceToObject).
+    /// TurnTo*: `0`.
+    pub distance: f32,
 }
 
 /// Parse an S2C Motion message. The MovementData is scanned far enough to
@@ -246,7 +276,39 @@ pub fn parse_motion(data: &[u8]) -> Option<MotionEvent> {
             }
         }
     }
-    Some(MotionEvent { guid, instance_seq, movement_type, style, commands })
+    // Approach bodies (verified against ACE.Server.Network.Motion:
+    // MoveToObject/MoveToPosition/TurnToObject writers):
+    //   6 MoveToObject:   u32 target, Origin(u32 cell, 3xf32),
+    //                     MoveToParameters(u32 flags, 6xf32), f32 runRate
+    //   7 MoveToPosition: Origin, MoveToParameters, f32 runRate
+    //   8 TurnToObject:   u32 target, f32 desiredHeading,
+    //                     TurnToParameters(u32 flags, 2xf32)
+    let approach = match movement_type {
+        movement_type::MOVE_TO_OBJECT if data.len() >= 16 + 52 => {
+            let mut r = Reader::new(&data[16..]);
+            let target = r.u32();
+            let cell = r.u32();
+            let pos = Vec3 { x: r.f32(), y: r.f32(), z: r.f32() };
+            r.u32(); // MovementParameters flags
+            let distance = r.f32(); // DistanceToObject
+            Some(ApproachMotion { movement_type, target, cell, pos, distance })
+        }
+        movement_type::MOVE_TO_POSITION if data.len() >= 16 + 48 => {
+            let mut r = Reader::new(&data[16..]);
+            let cell = r.u32();
+            let pos = Vec3 { x: r.f32(), y: r.f32(), z: r.f32() };
+            r.u32(); // MovementParameters flags
+            let distance = r.f32(); // DistanceToObject
+            Some(ApproachMotion { movement_type, target: 0, cell, pos, distance })
+        }
+        movement_type::TURN_TO_OBJECT if data.len() >= 16 + 20 => {
+            let mut r = Reader::new(&data[16..]);
+            let target = r.u32();
+            Some(ApproachMotion { movement_type, target, cell: 0, pos: Vec3::default(), distance: 0.0 })
+        }
+        _ => None,
+    };
+    Some(MotionEvent { guid, instance_seq, movement_type, style, commands, approach })
 }
 
 #[cfg(test)]
@@ -358,6 +420,70 @@ mod tests {
         let e = parse_motion(&[0u8; 16]).expect("header-only body");
         assert!(e.commands.is_empty());
     }
+
+    #[test]
+    fn parse_motion_move_to_object_approach() {
+        // Header (16) + MoveToObject body (52): u32 target, Origin(u32 cell,
+        // 3xf32), MoveToParameters(u32 flags, 6xf32), f32 runRate.
+        let mut d = vec![0u8; 16 + 52];
+        d[0..4].copy_from_slice(&0x0002_0158u32.to_le_bytes()); // self guid
+        d[12] = movement_type::MOVE_TO_OBJECT;
+        d[14..16].copy_from_slice(&0x003du16.to_le_bytes());
+        d[16..20].copy_from_slice(&900u32.to_le_bytes()); // vendor guid
+        d[20..24].copy_from_slice(&0x0c6a_0002u32.to_le_bytes()); // cell
+        d[24..28].copy_from_slice(&10.0f32.to_le_bytes()); // x
+        d[28..32].copy_from_slice(&20.0f32.to_le_bytes()); // y
+        d[32..36].copy_from_slice(&5.0f32.to_le_bytes()); // z
+        d[36..40].copy_from_slice(&0x3FFu32.to_le_bytes()); // MovementParameters
+        d[40..44].copy_from_slice(&2.5f32.to_le_bytes()); // DistanceToObject
+        d[44..48].copy_from_slice(&0.0f32.to_le_bytes()); // MinDistance
+        d[48..52].copy_from_slice(&1.0e10f32.to_le_bytes()); // FailDistance
+        d[52..56].copy_from_slice(&1.0f32.to_le_bytes()); // Speed
+        d[56..60].copy_from_slice(&15.0f32.to_le_bytes()); // WalkRunThreshold
+        d[60..64].copy_from_slice(&0.0f32.to_le_bytes()); // DesiredHeading
+        d[64..68].copy_from_slice(&1.0f32.to_le_bytes()); // RunRate
+        let e = parse_motion(&d).unwrap();
+        let a = e.approach.expect("approach body");
+        assert_eq!(a.target, 900);
+        assert_eq!(a.cell, 0x0c6a_0002);
+        assert!((a.pos.x - 10.0).abs() < f32::EPSILON);
+        assert!((a.pos.y - 20.0).abs() < f32::EPSILON);
+        assert!((a.distance - 2.5).abs() < f32::EPSILON);
+
+        // A body too short to hold the MoveToObject union leaves approach
+        // None rather than reading past the end.
+        let mut d = vec![0u8; 16 + 8];
+        d[12] = movement_type::MOVE_TO_OBJECT;
+        let e = parse_motion(&d).unwrap();
+        assert!(e.approach.is_none());
+    }
+
+    #[test]
+    fn parse_motion_turn_to_object_approach() {
+        // Header (16) + TurnToObject body (20): u32 target, f32 desiredHeading,
+        // TurnToParameters(u32 flags, 2xf32).
+        let mut d = vec![0u8; 16 + 20];
+        d[12] = movement_type::TURN_TO_OBJECT;
+        d[16..20].copy_from_slice(&777u32.to_le_bytes());
+        d[20..24].copy_from_slice(&1.57f32.to_le_bytes()); // desiredHeading
+        d[24..28].copy_from_slice(&0x1u32.to_le_bytes()); // flags
+        d[28..32].copy_from_slice(&1.5f32.to_le_bytes()); // Speed
+        d[32..36].copy_from_slice(&1.57f32.to_le_bytes()); // DesiredHeading
+        let e = parse_motion(&d).unwrap();
+        let a = e.approach.expect("turn body");
+        assert_eq!(a.target, 777);
+        assert_eq!(a.cell, 0);
+        assert_eq!(a.distance, 0.0);
+    }
+
+    #[test]
+    fn parse_motion_general_has_no_approach() {
+        let mut d = vec![0u8; 20];
+        d[12] = movement_type::GENERAL;
+        let e = parse_motion(&d).unwrap();
+        assert!(e.approach.is_none());
+    }
+
 
     #[test]
     fn soul_emote_body_layout() {

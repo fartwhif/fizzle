@@ -44,6 +44,12 @@ pub trait WorldProbe {
     /// intersect a solid (wall, building, closed door). Endpoint `z`s are the
     /// terrain heights at the endpoints (so slopes stay walkable).
     fn blocked(&mut self, x0: f32, y0: f32, z0: f32, x1: f32, y1: f32, z1: f32) -> bool;
+    /// The block-local region AABB of env cell `cell` (num < 0x10000) in
+    /// landblock `lb`, or `None` (no such env cell / dats unavailable).
+    fn env_cell_region(&mut self, lb: u32, cell: u32) -> Option<Aabb>;
+    /// The env cell in landblock `lb` whose region contains block-local
+    /// `(x, y)`, as the full cell id (`lb << 16 | num`), or `None`.
+    fn env_cell_at(&mut self, lb: u32, x: f32, y: f32) -> Option<u32>;
 }
 
 /// A third-person follow camera in block-local client coordinates.
@@ -105,6 +111,11 @@ pub struct Frame3D {
     pub rows: usize,
     /// Row-major RGB per cell.
     pub cells: Vec<[u8; 3]>,
+    /// Whether the frame rendered in first-person (head) mode — a cramped
+    /// room forced the follow camera to the head. The click-pick projection
+    /// must use the matching first-person camera basis to line up with the
+    /// on-screen framing.
+    pub first_person: bool,
 }
 
 /// The Dereth continent landmask (for the Map widget).
@@ -126,6 +137,32 @@ pub fn wrap_block_coord(v: f32) -> f32 {
     if m < 0.0 { m + BLOCK_LEN } else { m }
 }
 
+/// True when block-local `(x, y)` is inside `aabb`'s horizontal extent
+/// (± `margin`). The AABB may sit in an unwrapped world frame (an env
+/// cell's placement frame can put its structure at a negative offset), so
+/// each axis is compared on the 192-unit ring: a region at y = -35..-25
+/// contains the wrapped y = 163.52.
+#[must_use]
+pub fn region_contains_xy(aabb: &Aabb, x: f32, y: f32, margin: f32) -> bool {
+    const L: f32 = 192.0;
+    let ring = |a: f32, b: f32| {
+        let d = (a - b).rem_euclid(L);
+        d.min(L - d)
+    };
+    let dist_to_segment = |p: f32, lo: f32, hi: f32| {
+        let l = ring(lo, hi);
+        let dlo = ring(p, lo);
+        let dhi = ring(p, hi);
+        if dlo + dhi <= l + 1e-3 {
+            0.0
+        } else {
+            dlo.min(dhi)
+        }
+    };
+    dist_to_segment(x, aabb[0], aabb[3]) <= margin
+        && dist_to_segment(y, aabb[1], aabb[4]) <= margin
+}
+
 /// Compute (cached) the Dereth continent landmask from the retail cell dat.
 /// `None` when the dats are unavailable. The first call reads every
 /// CellLandblock record (~0.5 s); later calls are instant.
@@ -143,8 +180,21 @@ pub struct World3D {
     doors: std::collections::HashMap<u32, render::Door>,
     cur_lb: u32,
     statics: Vec<Solid>,
+    /// The env (indoor/structure) cell physics solids for the current
+    /// landblock — a town's walls (its LBI has no stabs). Collision-only
+    /// (the renderer draws the env soup); re-based on a landblock change.
+    env_statics: Vec<Solid>,
+    /// The env (indoor/structure) cell triangle soups for the current
+    /// landblock, one per cell: `(cell_id, drawn-vertex region, soup)` (the
+    /// walls/ceiling the renderer draws). The renderer skips the cell the
+    /// camera is inside. Re-based on a landblock change.
+    env_soup: Vec<(u32, Aabb, Vec<f32>)>,
     zoom: render::Zoom,
     anim: std::collections::HashMap<u32, render::AnimClock>,
+    /// Whether the last rendered frame used the first-person (head) camera —
+    /// a cramped room. The click-pick projection reads this to match the
+    /// on-screen camera basis.
+    last_first_person: bool,
 }
 
 impl World3D {
@@ -157,8 +207,11 @@ impl World3D {
             doors: std::collections::HashMap::new(),
             cur_lb: 0,
             statics: Vec::new(),
+            env_statics: Vec::new(),
+            env_soup: Vec::new(),
             zoom: render::Zoom::new(),
             anim: std::collections::HashMap::new(),
+            last_first_person: false,
         }
     }
 
@@ -166,6 +219,16 @@ impl World3D {
     #[must_use]
     pub fn available(&self) -> bool {
         self.scene.available()
+    }
+
+    /// The terrain height at block-local `(x, y)` in the given landblock,
+    /// loading the block's height grid on demand. `None` when the dats have
+    /// no terrain for the block. Unlike [`WorldProbe::height_at`] this takes
+    /// an explicit landblock, so it can ground entities in neighbouring
+    /// blocks (not just the player's).
+    #[must_use]
+    pub fn terrain_height(&mut self, lb: u32, x: f32, y: f32) -> Option<f32> {
+        self.scene.height_at(lb, x, y)
     }
 
     /// Zoom the 3D camera in (closer) by one wheel notch.
@@ -186,6 +249,14 @@ impl World3D {
         self.zoom.back()
     }
 
+    /// Whether the last rendered frame used the first-person (head) camera
+    /// (a cramped room pushed the follow camera in). The click-pick
+    /// projection uses this to build the same camera basis as the renderer.
+    #[must_use]
+    pub fn camera_first_person(&self) -> bool {
+        self.last_first_person
+    }
+
     /// Whether the camera at `from` has line of sight to the point `to` (both
     /// in the block-local frame the renderer uses): the straight segment
     /// between them is clear of the current landblock's terrain, static
@@ -198,6 +269,7 @@ impl World3D {
         !render::segment_blocked(
             self.scene.block_soup(self.cur_lb),
             &self.statics,
+            &self.env_statics,
             &self.doors,
             from,
             to,
@@ -212,6 +284,8 @@ impl World3D {
         }
         self.cur_lb = lb;
         self.statics = self.scene.solids_for_block(lb);
+        self.env_statics = self.scene.env_statics(lb);
+        self.env_soup = self.scene.env_soup(lb);
     }
 
     /// Add/update a door collision slab (`None` aabb drops it). `open` sets
@@ -253,8 +327,10 @@ impl World3D {
     /// Render the landblock `lb` from the camera `cam` into `cols × rows`.
     /// `actors` are the visible bodies; `glow` toggles the actor halos;
     /// `reticle` is the current target box (or `None`); `reticle_animated`
-    /// toggles the reticle's breathing pulse. `None` when there is nothing to
-    /// draw (no dats, no terrain and no actors, or too small).
+    /// toggles the reticle's breathing pulse; `self_guid` is the player's own
+    /// guid (hidden from the render in first-person, where the head camera
+    /// would otherwise show the body filling the view). `None` when there is
+    /// nothing to draw (no dats, no terrain and no actors, or too small).
     #[must_use]
     pub fn render(
         &mut self,
@@ -266,12 +342,15 @@ impl World3D {
         glow: bool,
         reticle: Option<&ReticleTarget>,
         reticle_animated: bool,
+        self_guid: Option<u32>,
     ) -> Option<Frame3D> {
-        render::render_frame(
+        let frame = render::render_frame(
             &mut self.scene,
             &mut self.zoom,
             &mut self.anim,
             &self.statics,
+            &self.env_statics,
+            &self.env_soup,
             &mut self.doors,
             lb,
             cam,
@@ -281,7 +360,10 @@ impl World3D {
             glow,
             reticle,
             reticle_animated,
-        )
+            self_guid,
+        );
+        self.last_first_person = frame.as_ref().is_some_and(|f| f.first_person);
+        frame
     }
 }
 
@@ -293,9 +375,130 @@ impl WorldProbe for World3D {
     fn blocked(&mut self, x0: f32, y0: f32, z0: f32, x1: f32, y1: f32, z1: f32) -> bool {
         collision::blocked(
             &self.statics,
+            &self.env_statics,
             &self.doors,
             x0, y0, z0,
             x1, y1, z1,
         )
+    }
+
+    fn env_cell_region(&mut self, lb: u32, cell: u32) -> Option<Aabb> {
+        self.scene
+            .env_cells(lb)
+            .into_iter()
+            .find(|(c, _)| *c == cell)
+            .map(|(_, b)| b)
+    }
+
+    fn env_cell_at(&mut self, lb: u32, x: f32, y: f32) -> Option<u32> {
+        self.scene
+            .env_cells(lb)
+            .into_iter()
+            .find(|(_, b)| region_contains_xy(b, x, y, 0.0))
+            .map(|(c, _)| (lb << 16) | c)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The lifestone's env region sits in an unwrapped frame (y = -35..-25);
+    /// the sim's position is block-wrapped (y = 163.52). Both must agree.
+    #[test]
+    fn region_contains_wrapped_frame() {
+        let r: Aabb = [5.0, -35.0, 0.0, 15.0, -25.0, 6.0];
+        assert!(region_contains_xy(&r, 12.32, 163.52, 0.0));
+        assert!(region_contains_xy(&r, 12.32, 158.0, 0.0));
+        // Just past the region's edge (wrapped hi = 167): outside.
+        assert!(!region_contains_xy(&r, 12.32, 170.0, 0.0));
+        // Past the wrapped lo (157): outside.
+        assert!(!region_contains_xy(&r, 12.32, 155.0, 0.0));
+    }
+
+    #[test]
+    fn region_contains_plain_frame() {
+        let r: Aabb = [10.0, 160.0, 0.0, 15.0, 167.0, 3.0];
+        assert!(region_contains_xy(&r, 12.0, 163.0, 0.0));
+        assert!(!region_contains_xy(&r, 16.0, 163.0, 0.0));
+        assert!(!region_contains_xy(&r, 12.0, 168.0, 0.0));
+    }
+
+    #[test]
+    fn region_contains_crossing_the_block_edge() {
+        // x spans 188..192 and 0..4 (the region crosses the 0/192 edge).
+        let r: Aabb = [188.0, 190.0, 0.0, 4.0, 2.0, 6.0];
+        assert!(region_contains_xy(&r, 0.0, 1.0, 0.0));
+        assert!(region_contains_xy(&r, 189.0, 1.0, 0.0));
+        assert!(!region_contains_xy(&r, 96.0, 1.0, 0.0));
+    }
+
+    #[test]
+    fn region_contains_margin() {
+        let r: Aabb = [10.0, 10.0, 0.0, 20.0, 20.0, 6.0];
+        assert!(region_contains_xy(&r, 9.6, 15.0, 0.5)); // 0.4 outside the edge
+        assert!(!region_contains_xy(&r, 9.4, 15.0, 0.5)); // 0.6 outside
+        assert!(region_contains_xy(&r, 15.0, 20.3, 0.5));
+        assert!(!region_contains_xy(&r, 15.0, 21.0, 0.5));
+    }
+
+    /// Regression: town walls exist only in env-cell physics (a town's
+    /// LBI has no stabs), in an unwrapped placement frame. The lifestone
+    /// room of retail town 0x8502 (cell 0x850201ad, env 0x0d0001c9, region
+    /// x 5..15, unwrapped y -35..-25): a player at the wrapped
+    /// (12.32, 163.52) must be blocked by the west wall (unwrapped x = 5),
+    /// may walk inside the room, and the renderer must show walls/ceiling.
+    #[test]
+    fn town_walls_render_and_collide() {
+        let Some(dir) = dats::find_dat_dir(None) else {
+            eprintln!("skipped: retail dats unavailable");
+            return;
+        };
+        let mut world = World3D::new(Some(&dir));
+        assert!(world.available());
+        let lb = 0x8502u32;
+        world.set_landblock(lb);
+
+        // The town's LBI has no stabs — its walls come from env cells.
+        assert!(world.statics.is_empty());
+        assert!(!world.env_statics.is_empty());
+
+        let (px, py) = (12.32f32, 163.52f32);
+        let z0 = world.height_at(px, py).unwrap_or(0.0);
+        // West toward the room's west wall (unwrapped x = 5): blocked.
+        assert!(world.blocked(px, py, z0, 4.0, py, z0));
+        // North, inside the room: clear.
+        assert!(!world.blocked(px, py, z0, px, py + 3.0, z0));
+
+        // The renderer must draw the room: walls/ceiling cover the view.
+        let cam = Camera { x: px, y: py, z: z0, heading: 0.0 };
+        let Some(frame) = world.render(lb, &cam, &[], 80, 24, false, None, false, None) else {
+            panic!("no frame for the town block");
+        };
+        let sky = frame.cells[0];
+        let non_sky = frame.cells.iter().filter(|c| **c != sky).count();
+        assert!(non_sky > 100, "town interior rendered almost empty: {non_sky}");
+    }
+
+    /// Regression: `set_landblock` must re-base the terrain probe's
+    /// landblock. A missing `cur_lb` update made `height_at` always query
+    /// landblock 0 — an all-zero record that pinned every grounded player to
+    /// z = 0, so teleporting to hilly terrain left the player far below the
+    /// ground while the renderer drew the correct block's terrain above.
+    /// (Flat-0 town tests cannot catch this: block 0 is also 0.)
+    #[test]
+    fn probe_tracks_set_landblock() {
+        let Some(dir) = dats::find_dat_dir(None) else {
+            eprintln!("skipped: retail dats unavailable");
+            return;
+        };
+        let mut world = World3D::new(Some(&dir));
+        assert!(world.available());
+        let lb = 0x3073u32; // (48, 115): hilly terrain, z 36..44
+        world.set_landblock(lb);
+        let probe = world.height_at(96.0, 96.0).expect("probe terrain height");
+        let scene = world.scene.height_at(lb, 96.0, 96.0).expect("scene terrain height");
+        assert_eq!(probe, scene, "the probe must query the set landblock");
+        assert!(probe > 1.0, "hilly block is not flat: {probe}");
     }
 }

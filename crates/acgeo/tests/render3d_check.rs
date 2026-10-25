@@ -16,7 +16,7 @@ fn render3d_shading() {
     let ground = w.height_at(cx, cy).unwrap_or(0.0);
     let cam = Camera { x: cx, y: cy, z: ground + 1.7, heading: 0.0 };
     let frame = w
-        .render(0, &cam, &[], 60, 12, false, None, false)
+        .render(0, &cam, &[], 60, 12, false, None, false, None)
         .expect("render returns Some with dats + terrain");
     let distinct = frame.cells.iter().cloned().collect::<std::collections::HashSet<_>>();
     let mut rows_uniform = 0;

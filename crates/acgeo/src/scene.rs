@@ -19,8 +19,10 @@ use crate::{Aabb, Solid};
 const REGION_DESC: u32 = 0x13000000;
 /// The "null part" sentinel GfxObj — never rendered.
 pub(crate) const NULL_PART: u32 = 0x010001ec;
-/// Landblock soup cache cap (the renderer only draws one landblock).
-const MAX_BLOCKS: usize = 4;
+/// Landblock soup cache cap. The renderer draws the 3×3 landblock grid around
+/// the player (9 blocks), so this must hold all nine plus headroom for the
+/// stragglers as the player crosses a block boundary.
+const MAX_BLOCKS: usize = 16;
 /// Part-mesh cache cap (dynamic actors reference a bounded set of models).
 const MAX_PART_MESHES: usize = 512;
 /// A landblock's edge length in units (an 8x8 grid of 24u subcells).
@@ -73,6 +75,20 @@ pub struct Scene {
     height_grids: HashMap<u32, Option<Vec<f32>>>,
     /// Static solid geometry per landblock (the collision + render solids).
     solid_objs: HashMap<u32, Vec<Solid>>,
+    /// Env (indoor/structure) cells present per landblock:
+    /// `(cellnum < 0x10000, block-local region AABB)`, cached.
+    env_regions: HashMap<u32, Vec<(u32, Aabb)>>,
+    /// Env (indoor/structure) cell triangle soups per landblock, one entry
+    /// per cell: `(cell_id, drawn-vertex region AABB, soup)`. The soup is
+    /// 12 floats/tri (3 verts + rgb), the walls/ceiling the renderer draws;
+    /// the region lets the renderer skip the cell the camera is inside so a
+    /// building shell doesn't wall in its interior. Cached.
+    env_soups: HashMap<u32, Vec<(u32, Aabb, Vec<f32>)>>,
+    /// Env (indoor/structure) cell physics solids per landblock (the walls
+    /// that block movement; a town's walls exist only here — its LBI has no
+    /// stabs). Triangles/bbox in the env cell's unwrapped placement frame;
+    /// the collision/occlusion paths test periodic copies. Cached.
+    env_solid_objs: HashMap<u32, Vec<Solid>>,
     // Per-id caches for the dynamic (animated) actors.
     setup_parts_cache: HashMap<u32, Option<Vec<u32>>>,
     mtable_cache: HashMap<u32, Option<MotionTable>>,
@@ -116,6 +132,9 @@ impl Scene {
             surf_cache: HashMap::new(),
             height_grids: HashMap::new(),
             solid_objs: HashMap::new(),
+            env_regions: HashMap::new(),
+            env_soups: HashMap::new(),
+            env_solid_objs: HashMap::new(),
             setup_parts_cache: HashMap::new(),
             mtable_cache: HashMap::new(),
             anim_cache: HashMap::new(),
@@ -329,6 +348,364 @@ impl Scene {
         out
     }
 
+    /// The env (indoor/structure) cells present in landblock `lb`, each with
+    /// its block-local region AABB (the environment's drawing geometry
+    /// transformed by the EnvCell position frame). Cached per landblock;
+    /// empty when the dats are unavailable or the block has no env cells.
+    /// The dat directory is sorted by id, so the block's env-cell range
+    /// (0x100..=0xFFFD) is a slice, not a scan.
+    #[must_use]
+    pub fn env_cells(&mut self, lb: u32) -> Vec<(u32, Aabb)> {
+        if let Some(v) = self.env_regions.get(&lb) {
+            return v.clone();
+        }
+        let mut out: Vec<(u32, Aabb)> = Vec::new();
+        if let (Some(cell), Some(portal)) = (self.cell.as_ref(), self.portal.as_ref()) {
+            let lo = lb * 0x10000 + 0x100;
+            let hi = lb * 0x10000 + 0xFFFD;
+            let mut ids: Vec<u32> = Vec::new();
+            {
+                let dir = cell.borrow();
+                let keys = dir.ids();
+                let start = keys.partition_point(|&k| k < lo);
+                for &id in &keys[start..] {
+                    if id > hi {
+                        break;
+                    }
+                    ids.push(id);
+                }
+            }
+            for id in ids {
+                let Some(rec) = cell.borrow_mut().read(id) else {
+                    continue;
+                };
+                let Some(ce) = acegeom::parse_env_cell(&rec) else {
+                    continue;
+                };
+                let Some(env) = portal.borrow_mut().read(ce.environment_id) else {
+                    continue;
+                };
+                let Some(data) = acegeom::parse_environment(&env, ce.cell_structure as u32)
+                else {
+                    continue;
+                };
+                let (mut mn, mut mx) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+                for i in (0..data.pos.len()).step_by(3) {
+                    let v =
+                        acegeom::apply_frame(&ce.position, data.pos[i], data.pos[i + 1], data.pos[i + 2]);
+                    for a in 0..3 {
+                        mn[a] = mn[a].min(v[a]);
+                        mx[a] = mx[a].max(v[a]);
+                    }
+                }
+                if !mn.iter().all(|v| v.is_finite()) {
+                    continue;
+                }
+                out.push((id & 0xFFFF, [mn[0], mn[1], mn[2], mx[0], mx[1], mx[2]]));
+            }
+        }
+        self.env_regions.insert(lb, out.clone());
+        out
+    }
+
+    /// The env (indoor/structure) cell triangle soups for landblock `lb`,
+    /// one entry per cell: `(cell_id, region, soup)`. The soup is 12
+    /// floats/tri (3 verts + rgb) — the walls/ceiling/floor the renderer
+    /// draws. Each CellStruct's drawing polygons are fanned, transformed by
+    /// the EnvCell position frame, and colored from the polygon's positive
+    /// surface. The region is the cell's drawn-vertex bbox (block-local); the
+    /// renderer skips the cell whose region contains the camera so a building
+    /// shell doesn't wall in its interior. Cached per landblock; empty when
+    /// the dats are unavailable or the block has no env cells.
+    #[must_use]
+    pub fn env_soup(&mut self, lb: u32) -> Vec<(u32, Aabb, Vec<f32>)> {
+        if let Some(v) = self.env_soups.get(&lb) {
+            return v.clone();
+        }
+        // Collect the env-cell geometry first; the dat borrows must be
+        // released before the surface-color resolution below (which re-borrows
+        // the portal).
+        struct EnvGeom {
+            cell_id: u32,
+            pos: Vec<f32>,
+            keys: Vec<u16>,
+            polys: Vec<acegeom::Poly>,
+            surface_ids: Vec<u32>,
+            position: Frame,
+        }
+        let mut envs: Vec<EnvGeom> = Vec::new();
+        if let (Some(cell), Some(portal)) = (self.cell.as_ref(), self.portal.as_ref()) {
+            let lo = lb * 0x10000 + 0x100;
+            let hi = lb * 0x10000 + 0xFFFD;
+            let mut ids: Vec<u32> = Vec::new();
+            {
+                let dir = cell.borrow();
+                let keys = dir.ids();
+                let start = keys.partition_point(|&k| k < lo);
+                for &id in &keys[start..] {
+                    if id > hi {
+                        break;
+                    }
+                    ids.push(id);
+                }
+            }
+            for id in ids {
+                let Some(rec) = cell.borrow_mut().read(id) else {
+                    continue;
+                };
+                let Some(ce) = acegeom::parse_env_cell(&rec) else {
+                    continue;
+                };
+                let Some(env) = portal.borrow_mut().read(ce.environment_id) else {
+                    continue;
+                };
+                let Some(data) =
+                    acegeom::parse_environment(&env, ce.cell_structure as u32)
+                else {
+                    continue;
+                };
+                envs.push(EnvGeom {
+                    cell_id: id,
+                    pos: data.pos,
+                    keys: data.keys,
+                    polys: data.polys,
+                    surface_ids: ce.surface_ids,
+                    position: ce.position,
+                });
+            }
+        }
+        let mut soups: Vec<(u32, Aabb, Vec<f32>)> = Vec::new();
+        for eg in &envs {
+            let key_map = acegeom::key_to_slot_map(&eg.keys);
+            let mut soup: Vec<f32> = Vec::new();
+            for poly in &eg.polys {
+                let surf_id = eg
+                    .surface_ids
+                    .get(poly.pos_surface as usize)
+                    .copied()
+                    .unwrap_or(0);
+                let surf_color = if surf_id != 0 {
+                    self.surface_color(surf_id)
+                } else {
+                    None
+                };
+                // Skip solid surfaces carrying the 0xff special flag (top
+                // byte): AC's invisible portal/trigger/filler planes. Drawing
+                // them turns a building's doorway orifice into a flat colored
+                // slab (blue/grey) instead of an open passage.
+                if surf_color.is_some_and(|c| (c >> 24) == 0xff) {
+                    continue;
+                }
+                let color = surf_color.map(mat_color).unwrap_or([96.0, 96.0, 96.0]);
+                let verts: Vec<[f32; 3]> = poly
+                    .vertex_ids
+                    .iter()
+                    .filter_map(|&k| {
+                        let slot = if let Some(m) = &key_map {
+                            m[k as usize]
+                        } else {
+                            k as i32
+                        };
+                        if slot < 0 || slot as usize * 3 + 2 >= eg.pos.len() {
+                            return None;
+                        }
+                        let i = slot as usize * 3;
+                        Some(acegeom::apply_frame(
+                            &eg.position,
+                            eg.pos[i],
+                            eg.pos[i + 1],
+                            eg.pos[i + 2],
+                        ))
+                    })
+                    .collect();
+                for t in 1..verts.len().saturating_sub(1) {
+                    let [a, b, c] = [verts[0], verts[t], verts[t + 1]];
+                    soup.extend_from_slice(&[
+                        a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2], color[0],
+                        color[1], color[2],
+                    ]);
+                }
+            }
+            // The cell's drawn-vertex bbox (block-local), for the renderer's
+            // "camera inside this building" test.
+            let region = if soup.is_empty() {
+                [0.0; 6]
+            } else {
+                let mut bb = [
+                    f32::INFINITY, f32::INFINITY, f32::INFINITY,
+                    f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY,
+                ];
+                for v in (0..soup.len()).step_by(12) {
+                    for k in 0..9 {
+                        let val = soup[v + k];
+                        bb[k % 3] = bb[k % 3].min(val);
+                        bb[3 + (k % 3)] = bb[3 + (k % 3)].max(val);
+                    }
+                }
+                bb
+            };
+            soups.push((eg.cell_id, region, soup));
+        }
+        self.env_soups.insert(lb, soups.clone());
+        soups
+    }
+
+    /// The env (indoor/structure) cell physics solids for landblock `lb`:
+    /// the walls that block movement. A town's walls exist only here (its
+    /// LBI has no stabs). Each env cell's physics polygons are fanned and
+    /// transformed by the EnvCell position frame (unwrapped — the frame can
+    /// sit outside the `[0, 192)` block frame). Cached per landblock; empty
+    /// when the dats are unavailable or no env cell carries physics.
+    #[must_use]
+    pub fn env_statics(&mut self, lb: u32) -> Vec<Solid> {
+        if let Some(v) = self.env_solid_objs.get(&lb) {
+            return v.clone();
+        }
+        let mut out: Vec<Solid> = Vec::new();
+        if let (Some(cell), Some(portal)) = (self.cell.as_ref(), self.portal.as_ref()) {
+            let lo = lb * 0x10000 + 0x100;
+            let hi = lb * 0x10000 + 0xFFFD;
+            let mut ids: Vec<u32> = Vec::new();
+            {
+                let dir = cell.borrow();
+                let keys = dir.ids();
+                let start = keys.partition_point(|&k| k < lo);
+                for &id in &keys[start..] {
+                    if id > hi {
+                        break;
+                    }
+                    ids.push(id);
+                }
+            }
+            for id in ids {
+                let Some(rec) = cell.borrow_mut().read(id) else {
+                    continue;
+                };
+                let Some(ce) = acegeom::parse_env_cell(&rec) else {
+                    continue;
+                };
+                let Some(env) = portal.borrow_mut().read(ce.environment_id) else {
+                    continue;
+                };
+                let Some(data) =
+                    acegeom::parse_environment(&env, ce.cell_structure as u32)
+                else {
+                    continue;
+                };
+                if data.phys_tris.is_empty() {
+                    continue;
+                }
+                // The drawing polys carry the special surfaces (0xff top
+                // byte) — AC's invisible portal/trigger planes that fill
+                // doorways and windows. The physics below would otherwise
+                // keep a solid slab across the doorway (the "grey barricade"),
+                // so carve the physics out at every orifice.
+                let key_map = acegeom::key_to_slot_map(&data.keys);
+                let mut orifices: Vec<[f32; 6]> = Vec::new();
+                for poly in &data.polys {
+                    let surf_id = ce
+                        .surface_ids
+                        .get(poly.pos_surface as usize)
+                        .copied()
+                        .unwrap_or(0);
+                    if surf_id == 0 {
+                        continue;
+                    }
+                    let Some(sbuf) = portal.borrow_mut().read(surf_id) else {
+                        continue;
+                    };
+                    let Some(surf) = acegeom::parse_surface(&sbuf) else {
+                        continue;
+                    };
+                    if !surf.color.is_some_and(|c| (c >> 24) == 0xff) {
+                        continue;
+                    }
+                    let mut mn = [f32::INFINITY; 3];
+                    let mut mx = [f32::NEG_INFINITY; 3];
+                    let mut any = false;
+                    for &k in &poly.vertex_ids {
+                        let slot = key_map.as_ref().map(|m| m[k as usize]).unwrap_or(k as i32);
+                        if slot < 0 || slot as usize * 3 + 2 >= data.pos.len() {
+                            continue;
+                        }
+                        let i = slot as usize * 3;
+                        let v = acegeom::apply_frame(
+                            &ce.position,
+                            data.pos[i],
+                            data.pos[i + 1],
+                            data.pos[i + 2],
+                        );
+                        for a in 0..3 {
+                            mn[a] = mn[a].min(v[a]);
+                            mx[a] = mx[a].max(v[a]);
+                        }
+                        any = true;
+                    }
+                    if any {
+                        // Expand the orifice sheet so the physics slab that
+                        // straddles the doorway is fully removed.
+                        const E: f32 = 1.5;
+                        orifices.push([
+                            mn[0] - E,
+                            mn[1] - E,
+                            mn[2] - E,
+                            mx[0] + E,
+                            mx[1] + E,
+                            mx[2] + E,
+                        ]);
+                    }
+                }
+                let mut bbox = [
+                    f32::INFINITY,
+                    f32::INFINITY,
+                    f32::INFINITY,
+                    f32::NEG_INFINITY,
+                    f32::NEG_INFINITY,
+                    f32::NEG_INFINITY,
+                ];
+                let mut tris: Vec<f32> = Vec::with_capacity(data.phys_tris.len());
+                for o in (0..data.phys_tris.len()).step_by(9) {
+                    let mut c = [0.0f32; 3];
+                    let mut verts = [[0.0f32; 3]; 3];
+                    for a in 0..3 {
+                        let v = acegeom::apply_frame(
+                            &ce.position,
+                            data.phys_tris[o + a * 3],
+                            data.phys_tris[o + a * 3 + 1],
+                            data.phys_tris[o + a * 3 + 2],
+                        );
+                        verts[a] = v;
+                        for a2 in 0..3 {
+                            c[a2] += v[a2] / 3.0;
+                        }
+                    }
+                    // Drop a physics tri whose centroid sits in a doorway
+                    // orifice (the portal plane that fills the opening).
+                    if orifices.iter().any(|r| {
+                        c[0] >= r[0] && c[0] <= r[3]
+                            && c[1] >= r[1] && c[1] <= r[4]
+                            && c[2] >= r[2] && c[2] <= r[5]
+                    }) {
+                        continue;
+                    }
+                    for v in &verts {
+                        for a2 in 0..3 {
+                            tris.push(v[a2]);
+                            bbox[a2] = bbox[a2].min(v[a2]);
+                            bbox[a2 + 3] = bbox[a2 + 3].max(v[a2]);
+                        }
+                    }
+                }
+                if tris.is_empty() || !bbox.iter().all(|v| v.is_finite()) {
+                    continue;
+                }
+                out.push(Solid { tris, bbox });
+            }
+        }
+        self.env_solid_objs.insert(lb, out.clone());
+        out
+    }
+
     /// The composed setup-model AABB at the model-space (identity) object
     /// frame: the render path's `obj ∘ posFrame ∘ partFrame` composition with
     /// `obj` the identity and `posFrame`/`partFrame` from the setup's default
@@ -525,6 +902,63 @@ mod tests {
         assert!((0.2..3.0).contains(&w), "setup width {w}");
         assert!((0.5..3.0).contains(&hgt), "setup height {hgt}");
     }
+
+    /// A town landblock (0x8502) in the retail cell dat: it carries env
+    /// (indoor/structure) cells, so the env soup (the walls/ceiling/floor the
+    /// renderer draws) is non-empty. This guards the town-interior render
+    /// path — a regression here means rooms render as empty space.
+    #[test]
+    fn smoke_env_soup() {
+        let Some(mut scene) = test_scene() else {
+            eprintln!("skipped: retail dats unavailable");
+            return;
+        };
+        assert!(scene.available());
+        let lb = 0x8502u32;
+        let soups = scene.env_soup(lb);
+        assert!(!soups.is_empty(), "town landblock should have env soup");
+        // Each cell: (cell_id, region, soup); 12 floats per directed triangle.
+        for (cell_id, region, soup) in &soups {
+            assert!(*cell_id != 0, "env cell id should be nonzero");
+            assert_eq!(soup.len() % 12, 0, "cell soup should be whole triangles");
+            // Region finite, and min <= max on every axis.
+            for ax in 0..3 {
+                assert!(region[ax].is_finite() && region[ax + 3].is_finite());
+                assert!(region[ax] <= region[ax + 3], "region min <= max");
+            }
+            // Every vertex is finite (no NaN/Inf from a bad frame transform).
+            for i in (0..soup.len()).step_by(12) {
+                for v in soup[i..i + 9].iter() {
+                    assert!(v.is_finite());
+                }
+            }
+        }
+    }
+    /// A town landblock (0x17b2, Redspire) carries env cells whose physics
+    /// would otherwise keep a solid slab across every doorway orifice. This
+    /// guards the env-physics path: well-formed 9-float tris, sane bboxes,
+    /// and a non-empty result (the walls still block movement).
+    #[test]
+    fn env_statics_well_formed() {
+        let Some(mut scene) = test_scene() else {
+            eprintln!("skipped: retail dats unavailable");
+            return;
+        };
+        assert!(scene.available());
+        let lb = 0x17b2u32; // Redspire
+        let solids = scene.env_statics(lb);
+        assert!(!solids.is_empty(), "town landblock should have env physics");
+        for s in &solids {
+            assert_eq!(s.tris.len() % 9, 0, "env physics should be whole triangles");
+            for (lo, hi) in (0..3).zip(3..6) {
+                assert!(s.bbox[lo] <= s.bbox[hi], "bbox min <= max on every axis");
+            }
+            for v in &s.tris {
+                assert!(v.is_finite(), "env physics vertex finite");
+            }
+        }
+    }
+
 
     #[test]
     fn degraded_without_dats() {

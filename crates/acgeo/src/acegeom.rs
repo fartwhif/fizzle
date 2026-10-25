@@ -839,14 +839,16 @@ fn skip_bsp_node(r: &mut R, kind: BspKind, depth: usize) -> Option<()> {
     if neg {
         skip_bsp_node(r, kind, depth + 1)?;
     }
-    if kind != BspKind::Cell {
-        r.bytes(16)?; // Sphere
+    if kind == BspKind::Cell {
+        return Some(());
     }
-    if kind != BspKind::Physics {
-        let n = r.u32()?;
-        for _ in 0..n {
-            r.u16()?;
-        }
+    r.bytes(16)?; // Sphere
+    if kind == BspKind::Physics {
+        return Some(());
+    }
+    let n = r.u32()?;
+    for _ in 0..n {
+        r.u16()?;
     }
     Some(())
 }
@@ -1260,11 +1262,56 @@ pub struct EnvData {
     pub pos: Vec<f32>,
     pub keys: Vec<u16>,
     pub polys: Vec<Poly>,
+    /// The physics polygons fan-triangulated (9 floats/tri) in model space
+    /// — the CellStruct's placement frame is applied by the caller. These
+    /// are the cell's collision surfaces (a town's walls exist only here —
+    /// its LBI has no stabs); empty when the record has no usable physics
+    /// geometry. The physics BSP's Solid flag is never set in env cells
+    /// (0 of 734,976 retail cells) — it is a GfxObj-only construct.
+    pub phys_tris: Vec<f32>,
+}
+
+/// Fan-triangulate `polys` against `vdata`'s vertex array into model-space
+/// triangles (9 floats/tri). Same corrupt-key guard as
+/// `parse_gfx_obj_physics`: a key with no vertex drops the referencing
+/// polygon instead of indexing past `pos`.
+fn fan_polygons(vdata: &VertexData, polys: &[Poly]) -> Vec<f32> {
+    let vcount = vdata.pos.len() / 3;
+    let key_to_slot = key_to_slot_map(&vdata.keys);
+    let mut tris = Vec::new();
+    for poly in polys {
+        if poly.num_pts < 3 {
+            continue;
+        }
+        let slot_of = |key: i16| -> Option<usize> {
+            let slot = match &key_to_slot {
+                None => key as u32 & 0xffff,
+                Some(m) => m[(key as u32 & 0xffff) as usize] as u32,
+            };
+            (slot < vcount as u32).then_some(slot as usize)
+        };
+        let Some(a) = slot_of(poly.vertex_ids[0]) else {
+            continue;
+        };
+        for i in 1..poly.num_pts - 1 {
+            let Some(b) = slot_of(poly.vertex_ids[i]) else {
+                continue;
+            };
+            let Some(c) = slot_of(poly.vertex_ids[i + 1]) else {
+                continue;
+            };
+            for &s in [a, b, c].iter() {
+                tris.extend_from_slice(&vdata.pos[s * 3..s * 3 + 3]);
+            }
+        }
+    }
+    tris
 }
 
 /// Environment (portal 0x0Dxxxxxx): pre-fab dungeon block. Returns the
-/// CellStruct's drawing polygons + vertex positions for the given cell
-/// structure key, or `None`.
+/// CellStruct's drawing polygons + vertex positions and its physics
+/// polygons fan-triangulated (`phys_tris`, the collision surfaces) for the
+/// given cell structure key, or `None`.
 pub fn parse_environment(buf: &[u8], cell_structure: u32) -> Option<EnvData> {
     let mut r = R::new(buf);
     r.u32()?; // Id
@@ -1285,9 +1332,10 @@ pub fn parse_environment(buf: &[u8], cell_structure: u32) -> Option<EnvData> {
         }
         r.align4();
         skip_bsp(&mut r, BspKind::Cell)?;
+        let mut phys_polys: Vec<Poly> = Vec::new();
         for _ in 0..n_physics_polygons {
             r.u16()?; // key
-            read_polygon(&mut r)?;
+            phys_polys.push(read_polygon(&mut r)?);
         }
         skip_bsp(&mut r, BspKind::Physics)?;
         let has_drawing_bsp = r.u32()?;
@@ -1296,10 +1344,12 @@ pub fn parse_environment(buf: &[u8], cell_structure: u32) -> Option<EnvData> {
         }
         r.align4();
         if key == cell_structure {
+            let phys_tris = fan_polygons(&vdata, &phys_polys);
             return Some(EnvData {
                 pos: vdata.pos,
                 keys: vdata.keys,
                 polys,
+                phys_tris,
             });
         }
     }

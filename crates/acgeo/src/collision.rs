@@ -93,11 +93,15 @@ pub fn seg_box(
 }
 
 /// True when moving a body from `(x0, y0, z0)` to `(x1, y1, z1)` would
-/// intersect a solid (wall, building, closed door). The endpoint `z`s are
-/// the terrain heights at the endpoints (so slopes stay walkable).
+/// intersect a solid (wall, building, closed door). `statics` are the
+/// LBI/structure solids and `env_statics` the env-cell physics solids
+/// (a town's walls); both are periodic in the block frame. The endpoint
+/// `z`s are the terrain heights at the endpoints (so slopes stay
+/// walkable).
 #[must_use]
 pub fn blocked(
     statics: &[Solid],
+    env_statics: &[Solid],
     doors: &HashMap<u32, crate::render::Door>,
     x0: f32,
     y0: f32,
@@ -108,13 +112,14 @@ pub fn blocked(
 ) -> bool {
     // Two horizontal body-height rays (knee + chest): a solid wall ~0.3u
     // or taller stops the player.
-    ray_blocked(statics, doors, x0, y0, z0 + 0.3, x1, y1, z1 + 0.3)
-        || ray_blocked(statics, doors, x0, y0, z0 + 1.5, x1, y1, z1 + 1.5)
+    ray_blocked(statics, env_statics, doors, x0, y0, z0 + 0.3, x1, y1, z1 + 0.3)
+        || ray_blocked(statics, env_statics, doors, x0, y0, z0 + 1.5, x1, y1, z1 + 1.5)
 }
 
 /// One body-height ray against the periodic statics + the closed doors.
 fn ray_blocked(
     statics: &[Solid],
+    env_statics: &[Solid],
     doors: &HashMap<u32, crate::render::Door>,
     ax: f32,
     ay: f32,
@@ -123,19 +128,18 @@ fn ray_blocked(
     by: f32,
     bz: f32,
 ) -> bool {
-    // Statics and door slabs live in the [0, BLOCK_LEN) block frame; the
-    // client frame is periodic in it (RETAIL.md §3: the sim keeps its
-    // block's frame, so its position can sit mid-step outside
-    // [0, BLOCK_LEN) after a boundary crossing). Test every periodic copy
-    // whose bbox overlaps the segment's span — one for an in-block step,
-    // up to four when the step crosses a block corner. A midpoint-based
-    // single shift misses the wall/door on the far side of a boundary the
-    // step straddles.
+    // LBI statics live in the [0, BLOCK_LEN) block frame; env-cell statics
+    // live in their unwrapped placement frame (a town's room wraps the
+    // block toroidally). Either way the world is periodic in BLOCK_LEN, so
+    // test every periodic copy whose bbox overlaps the segment's span —
+    // one for an in-block step, up to four when the step crosses a block
+    // corner. A midpoint-based single shift misses the wall/door on the
+    // far side of a boundary the step straddles.
     let (dx, dy, dz) = (bx - ax, by - ay, bz - az);
     let (xlo, xhi) = (ax.min(bx), ax.max(bx));
     let (ylo, yhi) = (ay.min(by), ay.max(by));
     let (zlo, zhi) = (az.min(bz), az.max(bz));
-    for s in statics {
+    for s in statics.iter().chain(env_statics.iter()) {
         let b = s.bbox;
         if zhi < b[2] || zlo > b[5] {
             continue;
@@ -254,21 +258,21 @@ mod tests {
         // A closed door slab the path must cross.
         doors.insert(1, crate::render::Door { aabb: [9.0, 18.0, 0.0, 11.0, 20.0, 4.0], open: 0.0, goal: 0.0, last_now: -1.0 });
         // Crossing the wall (the knee ray at z+0.3 hits it).
-        assert!(blocked(&[wall.clone()], &doors, 5.0, 10.0, 0.0, 15.0, 10.0, 0.0));
+        assert!(blocked(&[wall.clone()], &[], &doors, 5.0, 10.0, 0.0, 15.0, 10.0, 0.0));
         // Crossing the closed door.
-        assert!(blocked(&[], &doors, 5.0, 19.0, 0.0, 15.0, 19.0, 0.0));
+        assert!(blocked(&[], &[], &doors, 5.0, 19.0, 0.0, 15.0, 19.0, 0.0));
         // The same path with the door open does not block.
         doors.insert(1, crate::render::Door { aabb: [9.0, 18.0, 0.0, 11.0, 20.0, 4.0], open: 1.0, goal: 1.0, last_now: -1.0 });
-        assert!(!blocked(&[], &doors, 5.0, 19.0, 0.0, 15.0, 19.0, 0.0));
+        assert!(!blocked(&[], &[], &doors, 5.0, 19.0, 0.0, 15.0, 19.0, 0.0));
         // Mid-swing the door still blocks (the player can't clip through a
         // leaf that is only half open); past the 0.9 threshold it doesn't.
         doors.insert(1, crate::render::Door { aabb: [9.0, 18.0, 0.0, 11.0, 20.0, 4.0], open: 0.5, goal: 1.0, last_now: -1.0 });
-        assert!(blocked(&[], &doors, 5.0, 19.0, 0.0, 15.0, 19.0, 0.0));
+        assert!(blocked(&[], &[], &doors, 5.0, 19.0, 0.0, 15.0, 19.0, 0.0));
         doors.insert(1, crate::render::Door { aabb: [9.0, 18.0, 0.0, 11.0, 20.0, 4.0], open: 0.95, goal: 1.0, last_now: -1.0 });
-        assert!(!blocked(&[], &doors, 5.0, 19.0, 0.0, 15.0, 19.0, 0.0));
+        assert!(!blocked(&[], &[], &doors, 5.0, 19.0, 0.0, 15.0, 19.0, 0.0));
         // A path that avoids everything: it crosses the wall plane at
         // y = 0.5, below the triangle's rising hypotenuse (z < y/4).
-        assert!(!blocked(&[wall], &doors, 5.0, 0.5, 0.0, 15.0, 0.5, 0.0));
+        assert!(!blocked(&[wall], &[], &doors, 5.0, 0.5, 0.0, 15.0, 0.5, 0.0));
     }
 
     #[test]
@@ -276,7 +280,49 @@ mod tests {
         let wall = wall_solid();
         // The wall is at block-x 10; the client frame at x = 192+5 is the
         // same x, so the geometry must be shifted by +192.
-        assert!(blocked(&[wall], &HashMap::new(), 197.0, 10.0, 0.0, 207.0, 10.0, 0.0));
+        assert!(blocked(&[wall], &[], &HashMap::new(), 197.0, 10.0, 0.0, 207.0, 10.0, 0.0));
+    }
+
+    #[test]
+    fn blocked_by_unwrapped_env_wall_across_seam() {
+        // Regression: a town's walls exist only in env-cell physics, in an
+        // unwrapped placement frame (the town room wraps the block
+        // toroidally — retail town 0x8502's LBI has no stabs). A wall at
+        // unwrapped x = 193 (= wrapped x = 1), y -35..-25 (= wrapped
+        // 157..167), z 0..6 must block wrapped-frame steps on both sides of
+        // the 0/192 seam, and pass a step clear of the wall's end.
+        let wall = Solid {
+            // Vertical quad (two triangles) at x = 193, y -35..-25, z 0..6.
+            tris: vec![
+                193.0, -35.0, 0.0, 193.0, -25.0, 0.0, 193.0, -25.0, 6.0,
+                193.0, -35.0, 0.0, 193.0, -25.0, 6.0, 193.0, -35.0, 6.0,
+            ],
+            bbox: [193.0, -35.0, 0.0, 193.0, -25.0, 6.0],
+        };
+        // Player at wrapped x = 191 walking +x across the seam: the k = 0
+        // copy (x = 193) is crossed.
+        assert!(blocked(
+            &[],
+            &[wall.clone()],
+            &HashMap::new(),
+            191.0, 161.0, 0.0, 194.0, 161.0, 0.0,
+        ));
+        // The same step 1u clear of the wall's north end (wrapped y = 168
+        // = unwrapped y = -24, past the wall's y = -25 edge).
+        assert!(!blocked(
+            &[],
+            &[wall.clone()],
+            &HashMap::new(),
+            191.0, 168.0, 0.0, 194.0, 168.0, 0.0,
+        ));
+        // Player at wrapped x = 0.5 walking +x: the same wall's k = -1 copy
+        // (x = 1) is crossed.
+        assert!(blocked(
+            &[],
+            &[wall],
+            &HashMap::new(),
+            0.5, 161.0, 0.0, 2.0, 161.0, 0.0,
+        ));
     }
 
     #[test]
@@ -288,7 +334,7 @@ mod tests {
         // shift chosen from the segment midpoint sits a full block away
         // and let the player through the wall.
         let wall = wall_at_x(191.9);
-        assert!(blocked(&[wall], &HashMap::new(), 191.85, 10.0, 0.0, 192.2, 10.0, 0.0));
+        assert!(blocked(&[wall], &[], &HashMap::new(), 191.85, 10.0, 0.0, 192.2, 10.0, 0.0));
     }
 
     #[test]
@@ -297,7 +343,7 @@ mod tests {
         // (local x 0.1) crossed by the step -0.25 -> 0.2 (a position just
         // past the 0 boundary).
         let wall = wall_at_x(0.1);
-        assert!(blocked(&[wall], &HashMap::new(), -0.25, 10.0, 0.0, 0.2, 10.0, 0.0));
+        assert!(blocked(&[wall], &[], &HashMap::new(), -0.25, 10.0, 0.0, 0.2, 10.0, 0.0));
     }
 
     #[test]
@@ -309,7 +355,7 @@ mod tests {
             tris: vec![191.5, 191.75, 0.0, 192.5, 191.75, 0.0, 192.5, 191.75, 5.0],
             bbox: [191.5, 191.75, 0.0, 192.5, 191.75, 5.0],
         };
-        assert!(blocked(&[wall], &HashMap::new(), 191.7, 191.7, 0.0, 192.3, 192.3, 0.0));
+        assert!(blocked(&[wall], &[], &HashMap::new(), 191.7, 191.7, 0.0, 192.3, 192.3, 0.0));
     }
 
     #[test]
@@ -319,9 +365,9 @@ mod tests {
         // far-edge slab blocks a step just past the near boundary (-0.x).
         let mut doors = HashMap::new();
         doors.insert(1, crate::render::Door { aabb: [0.0, 9.0, 0.0, 2.0, 11.0, 4.0], open: 0.0, goal: 0.0, last_now: -1.0 });
-        assert!(blocked(&[], &doors, 191.95, 10.0, 0.0, 192.3, 10.0, 0.0));
+        assert!(blocked(&[], &[], &doors, 191.95, 10.0, 0.0, 192.3, 10.0, 0.0));
         let mut doors = HashMap::new();
         doors.insert(1, crate::render::Door { aabb: [190.0, 9.0, 0.0, 192.0, 11.0, 4.0], open: 0.0, goal: 0.0, last_now: -1.0 });
-        assert!(blocked(&[], &doors, -0.3, 10.0, 0.0, -0.05, 10.0, 0.0));
+        assert!(blocked(&[], &[], &doors, -0.3, 10.0, 0.0, -0.05, 10.0, 0.0));
     }
 }

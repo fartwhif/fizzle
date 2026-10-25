@@ -146,6 +146,7 @@ pub mod event {
     pub const CLEAR_TRADE_ACCEPTANCE: u32 = 0x0208;
     pub const COMMUNICATION_TRANSIENT_STRING: u32 = 0x02EB;
     pub const MAGIC_UPDATE_ENCHANTMENT: u32 = 0x02C2;
+    pub const MAGIC_REMOVE_ENCHANTMENT: u32 = 0x02C3;
     pub const UPDATE_TITLE: u32 = 0x002B;
     pub const SET_SQUELCH_DB: u32 = 0x01F4;
     pub const SEND_CLIENT_CONTRACT_TRACKER_TABLE: u32 = 0x0314;
@@ -1160,6 +1161,10 @@ pub struct ObjectCreate {
     pub motion_cmd: u32,
     /// PhysicsData state word (bit 0x4 = Ethereal: door open).
     pub physics_state: u32,
+    /// `PropertyFloat` UseRadius (0x20 weenie flag): the distance at which
+    /// the object can be used — the approach stop distance and the
+    /// vendor/loot window auto-close radius. `None` if absent.
+    pub use_radius: Option<f32>,
 }
 
 /// A `VectorUpdate` (0xF74E) message.
@@ -1608,6 +1613,11 @@ pub enum Event {
     /// `MagicUpdateEnchantment` (0x02C2): one enchantment changed on self.
     MagicUpdateEnchantment {
         enchantment: Enchantment,
+    },
+    /// `MagicRemoveEnchantment` (0x02C3): one enchantment removed from self.
+    MagicRemoveEnchantment {
+        spell_id: u16,
+        layer: u16,
     },
     /// `UpdateTitle` (0x002B): a title was (un)assigned or set as display.
     UpdateTitle {
@@ -2194,6 +2204,15 @@ fn decode_event(event_type: u32, r: &mut Reader) -> Event {
                 Event::Unknown
             } else {
                 Event::MagicUpdateEnchantment { enchantment: parse_enchantment(r) }
+            }
+        }
+        event::MAGIC_REMOVE_ENCHANTMENT => {
+            if r.remaining() < 4 {
+                Event::Unknown
+            } else {
+                let spell_id = r.u16();
+                let layer = r.u16();
+                Event::MagicRemoveEnchantment { spell_id, layer }
             }
         }
         event::UPDATE_TITLE => {
@@ -2912,6 +2931,7 @@ fn parse_object_create(data: &[u8]) -> ObjectCreate {
         is_vendor: false,
         motion_cmd: 0,
         physics_state: 0,
+        use_radius: None,
     };
     if data.len() < 4 {
         return oc;
@@ -3045,6 +3065,7 @@ fn parse_object_create(data: &[u8]) -> ObjectCreate {
     oc.wielder_id = tail.wielder_id;
     oc.valid_locs = tail.valid_locs;
     oc.cur_loc = tail.cur_loc;
+    oc.use_radius = tail.use_radius;
     oc
 }
 
@@ -3571,6 +3592,7 @@ struct ObjectDescTail {
     valid_locs: i32,
     cur_loc: i32,
     icon_id: u32,
+    use_radius: Option<f32>,
 }
 
 /// `ReadString16L` without panicking on a truncated buffer.
@@ -3771,7 +3793,9 @@ fn parse_object_desc_tail(r: &mut Reader) -> ObjectDescTail {
         if r.remaining() < 4 {
             return t;
         }
-        r.raw(4); // UseRadius
+        // PropertyFloat UseRadius: the distance at which the object can be
+        // used (approach stop distance / vendor auto-close radius).
+        t.use_radius = Some(r.f32());
     }
     if weenie_flags & 0x0008_0000 != 0 {
         if r.remaining() < 4 {
@@ -4584,6 +4608,18 @@ mod tests {
         assert_eq!(enchantment.caster_guid, 0x0028_0042);
         assert_eq!(enchantment.stat_mod_value, 1.25);
         assert_eq!(enchantment.spell_set_id, 0x0001_0000);
+    }
+
+    #[test]
+    fn enchantment_remove_event() {
+        let mut b = Writer::new();
+        b.u16(0x0184); // spellId
+        b.u16(3); // layer
+        let Event::MagicRemoveEnchantment { spell_id, layer } = ge_event(event::MAGIC_REMOVE_ENCHANTMENT, &b.out) else {
+            panic!("expected MagicRemoveEnchantment");
+        };
+        assert_eq!(spell_id, 0x0184);
+        assert_eq!(layer, 3);
     }
 
     #[test]

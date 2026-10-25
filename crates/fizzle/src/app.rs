@@ -9,7 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKe
 use acproto::codec::Vec3;
 use acproto::messages::{self, combat_mode, Event, GameEvent, Incoming};
 use acproto::motion::{self, soul_emote_body};
-use crate::movement::{HeldKeys, Movement, TICK};
+use crate::movement::{approach_step, global_xy, HeldKeys, Movement, TICK};
 use crate::net::{Net, NetEvent};
 use acgeo::{World3D, WorldProbe};
 use crate::themes::Theme;
@@ -26,6 +26,12 @@ const RECONNECT_MAX_MS: u64 = 300_000;
 /// short window past the terminal's auto-repeat interval stops motion ~100 ms
 /// after the last repeat instead of relying on a release we never get.
 const MOVE_HOLD_WINDOW: Duration = Duration::from_millis(100);
+
+/// Maximum drop (world units) below the terrain for which a grounded outdoor
+/// entity is snapped back up to the ground. Server world data occasionally
+/// places objects a little under the surface; the cap keeps genuinely
+/// sub-surface objects (dungeons, mines) untouched.
+const GROUND_SNAP_MAX: f32 = 8.0;
 
 /// Top-level session phase.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -314,6 +320,18 @@ pub struct App {
     /// A pending vendor order asked for a second Esc (retail's confirm
     /// dialog); any other input disarms it.
     pub confirm_close_vendor: bool,
+    /// A server-issued approach in progress (S2C Motion `MoveToObject` /
+    /// `TurnToObject`): the sim turns and walks to the target until within
+    /// its use distance; a user movement key or the window opening clears
+    /// it.
+    approach: Option<motion::ApproachMotion>,
+    /// The client's distance to the vendor at the moment its window opened
+    /// (and same for `container_open_dist`): the server may open the window
+    /// while the client is briefly outside the use radius (its own physics
+    /// position lagging), so auto-close only fires once the player moves
+    /// AWAY.
+    vendor_open_dist: Option<f32>,
+    container_open_dist: Option<f32>,
     /// The single unified target (a world entity or an item in a pack/shop/
     /// trade/opened container). Exactly one thing is targeted at a time; the
     /// status bar is the only place it is shown. Setting a world target
@@ -341,7 +359,7 @@ pub struct App {
     pub reticle_animation: bool,
     /// Retail DAT directory override (None = auto-resolve).
     pub dat_dir: Option<String>,
-    /// Selected multi-widget index (0..=13).
+    /// Selected multi-widget index (0..=14).
     pub multi_sel: usize,
     // Auto-reconnect watchdog:
     pub reconnect_at: Option<Instant>,
@@ -412,6 +430,9 @@ impl App {
             drag: None,
             mouse_xy: None,
             confirm_close_vendor: false,
+            approach: None,
+            vendor_open_dist: None,
+            container_open_dist: None,
             target: None,
             last_click_at: None,
             last_click_pos: None,
@@ -609,7 +630,6 @@ impl App {
     }
 
     // ================================================================ dispatch
-
     fn dispatch(&mut self, inb: Incoming) {
         match inb {
             Incoming::CharacterList(list) => {
@@ -698,14 +718,24 @@ impl App {
                     motion_cmd: o.motion_cmd,
                     physics_state: o.physics_state,
                     is_vendor: o.is_vendor,
+                    use_radius: o.use_radius,
                 };
+                // The player's own ObjectCreate carries the authoritative
+                // spawn position (the movement sim handles it); every other
+                // object is snapped up if the server placed it just under
+                // the surface.
+                let is_self = Some(o.guid) == self.self_guid;
+                let position = position.map(|p| {
+                    let pos = if is_self { p.pos } else { self.ground_pos(p.cell, p.pos) };
+                    (p.cell, pos, [p.rot.w, p.rot.x, p.rot.y, p.rot.z])
+                });
                 self.world.object_create(
                     o.guid,
                     o.name,
-                    position.map(|p| p.cell),
-                    position.map(|p| p.pos),
+                    position.as_ref().map(|t| t.0),
+                    position.as_ref().map(|t| t.1),
                     Some(&item),
-                    position.map(|p| [p.rot.w, p.rot.x, p.rot.y, p.rot.z]),
+                    position.as_ref().map(|t| t.2),
                 );
                 // Track player-owned items in the inventory (paper doll /
                 // main pack): equipped when worn, else in the main pack (a
@@ -745,15 +775,15 @@ impl App {
                             position.map(|p| {
                                 let mut aabb = transform_aabb(
                                     m,
-                                    [p.pos.x, p.pos.y, p.pos.z],
-                                    [p.rot.w, p.rot.x, p.rot.y, p.rot.z],
+                                    [p.1.x, p.1.y, p.1.z],
+                                    p.2,
                                 );
                                 // Ground the slab: the setup model's local frame
                                 // does not put its base at the origin, so the
                                 // world box's z-min sits below the door's world
                                 // z (the ground). Shift it up so the base rests
                                 // on the ground rather than sinking in.
-                                let dz = p.pos.z - aabb[2];
+                                let dz = p.1.z - aabb[2];
                                 aabb[2] += dz;
                                 aabb[5] += dz;
                                 aabb
@@ -774,7 +804,7 @@ impl App {
                     // Self is a first-class, targetable player entity.
                     self.world.set_self(o.guid, self.self_name.clone());
                     if let Some(p) = position {
-                        self.movement = Some(Movement::new(p.cell, p.pos));
+                        self.movement = Some(Movement::new(p.0, p.1));
                         self.phase = Phase::InWorld;
                         self.status = "In world.".into();
                         // Tell the server we exited portal space. Until
@@ -835,19 +865,42 @@ impl App {
                         mv.apply_correction(up.cell, &up.pos, self.pending_teleport);
                         if self.pending_teleport {
                             self.pending_teleport = false;
+                            // Resend LoginComplete after every teleport, not
+                            // just the world entry: the server keeps the
+                            // player in portal space (Teleporting) until it
+                            // arrives, and while it does it silently drops
+                            // every MoveToState / AutonomousPosition position
+                            // update — logout would then re-save the teleport
+                            // drop instead of where we actually walked to.
+                            self.send_action(messages::action::LOGIN_COMPLETE, &[]);
                         }
                     }
                 } else {
-                    self.world.update_position(up.guid, up.cell, up.pos, Some([up.rot.w, up.rot.x, up.rot.y, up.rot.z]));
+                    let pos = self.ground_pos(up.cell, up.pos);
+                    self.world.update_position(up.guid, up.cell, pos, Some([up.rot.w, up.rot.x, up.rot.y, up.rot.z]));
                 }
             }
-            Incoming::PlayerTeleport(guid) => {
-                if Some(guid) == self.self_guid {
-                    self.pending_teleport = true;
-                }
+            Incoming::PlayerTeleport(_teleport_seq) => {
+                // The S2C packet carries only a teleport sequence, no guid
+                // (GameMessagePlayerTeleport.cs) — it is self-directed. Arm
+                // the pending-teleport snap unconditionally: the next self
+                // UpdatePosition snaps and re-sends LoginComplete (above),
+                // which is what releases the server's Teleporting state.
+                self.pending_teleport = true;
+                // A teleport ends any in-flight approach.
+                self.approach = None;
             }
             Incoming::VectorUpdate(_) => {}
             Incoming::Motion(m) => {
+                // A server-issued approach for our own character (a Use
+                // from beyond the object's use distance): turn and walk to
+                // it until within `distance`, then the server fires the
+                // use (window opens). Consumed in the movement tick.
+                if let Some(a) = m.approach {
+                    if Some(m.guid) == self.self_guid {
+                        self.approach = Some(a);
+                    }
+                }
                 // The S2C Motion carries the stance (style) and the motion
                 // commands (forward/sidestep/turn + command list). For
                 // players/creatures this drives the 3D pose (peace vs combat
@@ -1191,6 +1244,13 @@ impl App {
                         .collect(),
                     ..Default::default()
                 };
+                // The window opened: the walk-up is done, and the
+                // auto-close baseline is the client's distance now (the
+                // server's own position may lag the client's).
+                self.vendor_open_dist = self.global_self_dist(v.vendor_guid);
+                if self.approach.is_some_and(|a| a.target == v.vendor_guid) {
+                    self.approach = None;
+                }
             }
             Event::WeenieError { code } => {
                 self.world.chat.push("Error", &format!("Error {code}"), ChatStyle::Error);
@@ -1259,9 +1319,13 @@ impl App {
                 self.world.chat.push("System", &text, ChatStyle::System);
             }
             Event::MagicUpdateEnchantment { enchantment } => {
+                self.world.upsert_enchantment(&enchantment);
                 self.world
                     .flash
                     .replace(format!("Enchanted: spell {:#04x}", enchantment.spell_id));
+            }
+            Event::MagicRemoveEnchantment { spell_id, layer } => {
+                self.world.remove_enchantment(spell_id, layer);
             }
             Event::UpdateTitle { title_id, set_as_display } => {
                 if set_as_display {
@@ -1332,6 +1396,12 @@ impl App {
                     items: items.iter().map(|(g, _)| self.world.item_state(*g)).collect(),
                     sel: 0,
                 };
+                // The window opened: the walk-up is done, and the
+                // auto-close baseline is the client's distance now.
+                self.container_open_dist = self.global_self_dist(container_guid);
+                if self.approach.is_some_and(|a| a.target == container_guid) {
+                    self.approach = None;
+                }
             }
             Event::UseDone { code, text } => {
                 if let Some(t) = text {
@@ -1421,6 +1491,29 @@ impl App {
                 self.status = format!("Send failed: {e}");
             }
         }
+    }
+
+    /// Snap a world entity's z up to the terrain when it is below it. The
+    /// server's world data occasionally places objects under the ground (a
+    /// retail client rests them on the surface via physics); un-corrected
+    /// they render buried, get terrain-occluded, and can't be targeted. Only
+    /// entities *below* the terrain are raised, so flying creatures and
+    /// raised platforms (above it) are untouched; the cap at
+    /// [`GROUND_SNAP_MAX`] leaves genuinely sub-surface objects (dungeons,
+    /// mines) alone.
+    fn ground_pos(&mut self, cell: u32, mut pos: Vec3) -> Vec3 {
+        let Some(w) = self.world3d.as_mut() else {
+            return pos;
+        };
+        let lb = (cell >> 16) & 0xFFFF;
+        let Some(h) = w.terrain_height(lb, pos.x, pos.y) else {
+            return pos;
+        };
+        let below = h - pos.z;
+        if below > 0.0 && below <= GROUND_SNAP_MAX {
+            pos.z = h;
+        }
+        pos
     }
 
     // =============================================================== character
@@ -1608,6 +1701,20 @@ impl App {
         self.world.target_index = 0;
         self.world.target_health = None;
         self.world.target_health_max = None;
+    }
+
+    /// Clicked empty space (nothing under the click): deselect the current
+    /// target. Clears the client-side target and tells the server to drop its
+    /// selected target — a click on nothing sends `QueryHealth(0)` in retail.
+    pub fn deselect_target(&mut self) {
+        if self.phase != Phase::InWorld || self.world.dead {
+            return;
+        }
+        if self.target.is_none() {
+            return;
+        }
+        self.clear_target();
+        self.send_action(messages::action::QUERY_HEALTH, &messages::body_query_health(0));
     }
 
     // ---------------------------------------------------- world actions
@@ -1862,6 +1969,7 @@ impl App {
             return;
         }
         self.world.vendor = Default::default();
+        self.vendor_open_dist = None;
         self.confirm_close_vendor = false;
         self.world.flash = Some("vendor closed".into());
     }
@@ -1873,6 +1981,7 @@ impl App {
             return;
         }
         self.world.container = Default::default();
+        self.container_open_dist = None;
         self.send_action(
             messages::action::NO_LONGER_VIEWING_CONTENTS,
             &messages::body_no_longer_viewing(guid),
@@ -2748,6 +2857,8 @@ impl App {
         if is_move_key(ev.code) {
             let down = matches!(ev.kind, KeyEventKind::Press | KeyEventKind::Repeat);
             if down {
+                // User takes over the controls: the walk-up is cancelled.
+                self.approach = None;
                 self.keys_down.insert(ev.code, Instant::now());
             } else {
                 self.keys_down.remove(&ev.code);
@@ -2923,7 +3034,7 @@ impl App {
                             self.menu_view = Some(Themes);
                         }
                         1 => {
-                            self.widget_sel = self.multi_sel.min(13);
+                            self.widget_sel = self.multi_sel.min(14);
                             self.menu_view = Some(Widgets);
                         }
                         2 => {
@@ -2967,7 +3078,7 @@ impl App {
                 }
             }
             Some(Widgets) => {
-                const N: usize = 14;
+                const N: usize = 15;
                 match ev.code {
                     KeyCode::Up | KeyCode::Char('k') => self.widget_sel = (self.widget_sel + N - 1) % N,
                     KeyCode::Down | KeyCode::Char('j') => self.widget_sel = (self.widget_sel + 1) % N,
@@ -3026,6 +3137,24 @@ impl App {
         }
     }
 
+    /// The self's current motion stance for the outgoing `MoveToState`: the
+    /// stance the server last set via S2C Motion (low 16 bits of
+    /// `Entity.style`), so moving preserves the combat stance instead of
+    /// dropping back to NonCombat. `0` (no stance set yet) falls back to
+    /// NonCombat.
+    #[must_use]
+    fn self_motion_style(&self) -> u32 {
+        let low = self
+            .self_guid
+            .and_then(|g| self.world.entities.get(&g).map(|e| e.style & 0xFFFF))
+            .unwrap_or(0);
+        if low == 0 {
+            motion::MOTION_STYLE
+        } else {
+            0x8000_0000 | low
+        }
+    }
+
     /// Stop all motion input (retail gates input via `PlayerIsDead`; a key
     /// still held in `keys_down` would otherwise keep sending motion after we
     /// die, and a stale jump would fire right after we revive).
@@ -3033,6 +3162,158 @@ impl App {
         self.keys_down.clear();
         self.pending_jump = false;
     }
+
+    /// Drive one tick of the server-issued approach: turn in place until
+    /// facing the target, then walk (retail does not sprint up to a
+    /// vendor) until within its use distance. The live entity position
+    /// wins over the Motion's origin (the target may have moved); a
+    /// TurnToObject only faces the target.
+    fn approach_drive(&mut self, held: &mut HeldKeys, walking: &mut bool) {
+        let Some(app) = self.approach else { return };
+        if self.world.dead {
+            self.approach = None;
+            return;
+        }
+        let (cell, pos) = match self.world.entities.get(&app.target) {
+            Some(e) => (e.cell, e.pos),
+            None if app.cell != 0 => (app.cell, app.pos),
+            None => {
+                // Target vanished (culled / despawned): give up.
+                self.approach = None;
+                return;
+            }
+        };
+        let Some(mv) = self.movement.as_ref() else {
+            self.approach = None;
+            return;
+        };
+        let (sgx, sgy) = global_xy(mv.cell, mv.pos.x, mv.pos.y);
+        let (tgx, tgy) = global_xy(cell, pos.x, pos.y);
+        let dx = tgx - sgx;
+        let dy = tgy - sgy;
+        let dist = (dx * dx + dy * dy).sqrt();
+        if app.movement_type == motion::movement_type::TURN_TO_OBJECT {
+            // Face the target and stop (the server fires the use once the
+            // turn completes). "Facing" is within one 50 ms turn
+            // increment, or the target is so close a heading is
+            // meaningless.
+            let mut delta = dx.atan2(dy) - mv.heading;
+            let pi = std::f32::consts::PI;
+            while delta > pi {
+                delta -= 2.0 * pi;
+            }
+            while delta < -pi {
+                delta += 2.0 * pi;
+            }
+            let aligned = dist < 1.0 || delta.abs() <= 0.075;
+            held.turn_left = !aligned && delta < 0.0;
+            held.turn_right = !aligned && delta > 0.0;
+            held.forward = false;
+            held.backward = false;
+            held.strafe_left = false;
+            held.strafe_right = false;
+            held.stop = false;
+            if aligned {
+                self.approach = None;
+            }
+            return;
+        }
+        let step = approach_step(mv.heading, dx, dy, dist, app.distance);
+        // The approach takes over the locomotion input; user movement keys
+        // cancel the approach itself (key handler).
+        held.forward = step.forward;
+        held.backward = false;
+        held.strafe_left = false;
+        held.strafe_right = false;
+        held.stop = false;
+        held.turn_left = step.turn_left;
+        held.turn_right = step.turn_right;
+        if step.arrived {
+            self.approach = None;
+        } else {
+            *walking = true;
+        }
+    }
+
+    /// Close an open vendor/loot window once the player is farther than
+    /// the object's use distance (plus an anti-flap margin). The server
+    /// never sends a window close: the vendor's 1.5 s `CheckClose` only
+    /// fires the Close emote, and containers have no server-side distance
+    /// check at all, so this is the retail client's job.
+    /// The client's 3D distance to a world entity (`None` if either is
+    /// unknown).
+    fn global_self_dist(&self, guid: u32) -> Option<f32> {
+        let mv = self.movement.as_ref()?;
+        let e = self.world.entities.get(&guid)?;
+        let (sgx, sgy) = global_xy(mv.cell, mv.pos.x, mv.pos.y);
+        let (tgx, tgy) = global_xy(e.cell, e.pos.x, e.pos.y);
+        let dx = tgx - sgx;
+        let dy = tgy - sgy;
+        let dz = mv.pos.z - e.pos.z;
+        Some((dx * dx + dy * dy + dz * dz).sqrt())
+    }
+
+    fn close_windows_out_of_range(&mut self) {
+        // Compute the closes first: the entity/movement borrows below must
+        // end before the window state is mutated.
+        let mut closes = [false, false];
+        let mut baselines = [None, None];
+        if let Some(mv) = self.movement.as_ref() {
+            for (i, (guid, open_dist)) in [
+                (self.world.vendor.guid, self.vendor_open_dist),
+                (self.world.container.guid, self.container_open_dist),
+            ]
+            .iter()
+            .enumerate()
+            {
+                let (guid, open_dist) = (*guid, *open_dist);
+                if guid == 0 {
+                    continue;
+                }
+                let Some(e) = self.world.entities.get(&guid) else { continue };
+                let (sgx, sgy) = global_xy(mv.cell, mv.pos.x, mv.pos.y);
+                let (tgx, tgy) = global_xy(e.cell, e.pos.x, e.pos.y);
+                let dx = tgx - sgx;
+                let dy = tgy - sgy;
+                let dz = mv.pos.z - e.pos.z;
+                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                // Server fallback for a missing UseRadius is 0.6
+                // (`target.UseRadius ?? 0.6f`); the margin stops the window
+                // flapping while the player stands at the edge.
+                let in_range = dist <= e.use_radius.unwrap_or(0.6) + 0.5;
+                if in_range {
+                    // Still in range; tighten the moved-away baseline to the
+                    // closest the client has been since the window opened.
+                    baselines[i] = open_dist.map(|od| od.min(dist));
+                    continue;
+                }
+                // The server may open the window while the client is briefly
+                // outside the radius (its own physics position lagging), so
+                // only close once the player moves AWAY: at least 0.5 u past
+                // the closest distance since the window opened. No baseline
+                // yet (window state rebuilt after a reconnect): close.
+                closes[i] = open_dist.is_none_or(|od| dist > od + 0.5);
+                if !closes[i] {
+                    baselines[i] = open_dist.map(|od| od.min(dist));
+                }
+            }
+        }
+        if closes[0] && self.world.vendor.guid != 0 {
+            // Auto-close abandons a pending order without the confirm.
+            self.world.vendor = Default::default();
+            self.vendor_open_dist = None;
+            self.confirm_close_vendor = false;
+            self.world.flash = Some("too far — vendor closed".into());
+        } else if let Some(b) = baselines[0] {
+            self.vendor_open_dist = Some(b);
+        }
+        if closes[1] && self.world.container.guid != 0 {
+            self.request_close_container();
+        } else if let Some(b) = baselines[1] {
+            self.container_open_dist = Some(b);
+        }
+    }
+
 
     // =================================================================== tick
 
@@ -3197,21 +3478,43 @@ impl App {
             let mut held = self.held_keys();
             held.jump = self.pending_jump;
             self.pending_jump = false;
-            let walking = self.shift_held || !self.run_lock;
+            let mut walking = self.shift_held || !self.run_lock;
+            // Server-issued approach (Use from beyond the object's use
+            // distance): synthesize the motion input until within the stop
+            // distance; user movement keys cancel it (key handler).
+            if self.approach.is_some() {
+                self.approach_drive(&mut held, &mut walking);
+            }
+            let style = self.self_motion_style();
+            // Re-base the probe on the current landblock BEFORE the tick so
+            // terrain/solid queries answer for the block we're actually in.
+            // A teleport changes the cell; probing with the previous block's
+            // `cur_lb` grounded the character on the wrong terrain.
+            if let Some(mv) = self.movement.as_ref() {
+                let lb = (mv.cell >> 16) & 0xFFFF;
+                if let Some(w) = self.world3d.as_mut() {
+                    w.set_landblock(lb);
+                }
+            }
             if let Some(mv) = self.movement.as_mut() {
                 // Terrain / solid / door collision probe (retail DATs);
                 // `None` when the dats are unavailable (flat-plane behavior).
                 let probe = self.world3d.as_mut().map(|w| w as &mut dyn WorldProbe);
-                let actions = mv.tick(TICK, &mut held, walking, now, probe);
+                let actions = mv.tick(TICK, &mut held, walking, now, probe, style);
                 let lb = (mv.cell >> 16) & 0xFFFF;
                 self.send_move_actions(actions);
-                // Re-base the 3D static geometry on a landblock change
-                // (no-op while unchanged).
+                // Re-base again after the tick (maintain_cell may have crossed
+                // a boundary or entered an env cell), keeping the render and
+                // the next tick in sync. No-op while unchanged.
                 if let Some(w) = self.world3d.as_mut() {
                     w.set_landblock(lb);
                 }
                 self.refresh_targets();
             }
+            // Retail client behavior: an open vendor/loot window closes
+            // when the player moves beyond the object's use distance (the
+            // server sends no close of its own).
+            self.close_windows_out_of_range();
         }
         // Far-cull distant entities (throttled to at most once per second;
         // the guards keep self, the current target, the trade partner, an
@@ -3239,6 +3542,11 @@ impl App {
                 let _ = self.world.far_cull(mv.cell, &mv.pos, &keep, now);
                 self.last_cull = Some(now);
             }
+        }
+        // Enchantment countdown: drop locally-expired buffs (the server also
+        // sends a remove on natural expiry).
+        if self.phase == Phase::InWorld {
+            self.world.expire_enchantments(now);
         }
         // In-world timers: game-level ping (10 s), the target health
         // heartbeat (1 Hz), and the idle logout (1200 s of no input).
@@ -3371,6 +3679,50 @@ mod tests {
         assert!(!app.held_keys().forward, "a key past the window is released");
     }
 
+    /// Regression for the Redspire "NPCs/portals render below the ground and
+    /// can't be targeted" bug: the server's world data places some objects a
+    /// little under the terrain, so `ground_pos` raises them to the surface.
+    /// Dats-gated (needs the retail terrain to query).
+    #[test]
+    fn ground_pos_snaps_below_terrain_capped() {
+        let Some(dat_dir) = acgeo::dats::find_dat_dir(None) else {
+            eprintln!("skipped: retail dats unavailable");
+            return;
+        };
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        app.world3d = Some(acgeo::World3D::new(Some(&dat_dir)));
+        // Redspire (Marae Lassel) town plateau, block 0x17B2: terrain ~44.0.
+        let cell = 0x17B2u32 << 16;
+        // An object the server placed ~2.8 u under the plateau snaps up.
+        let p = app.ground_pos(cell, Vec3 { x: 123.8, y: 54.64, z: 41.21 });
+        assert!((p.z - 44.0).abs() < 0.1, "below-terrain object snaps up, got z={}", p.z);
+        // An elevated object (above the terrain) is left alone.
+        let p = app.ground_pos(cell, Vec3 { x: 123.8, y: 54.64, z: 50.0 });
+        assert!((p.z - 50.0).abs() < 1e-3, "elevated object untouched, got z={}", p.z);
+        // A genuinely sub-surface object (> GROUND_SNAP_MAX below) is left alone.
+        let p = app.ground_pos(cell, Vec3 { x: 123.8, y: 54.64, z: 30.0 });
+        assert!((p.z - 30.0).abs() < 1e-3, "deep object untouched, got z={}", p.z);
+    }
+
+    /// The self's outgoing `MoveToState` stance must track the stance the
+    /// server last set (`Entity.style`), so moving preserves the combat
+    /// stance instead of dropping to NonCombat. `0` (unset) falls back to
+    /// NonCombat; the autonomous bit is re-added for the RawMotionState style.
+    #[test]
+    fn self_motion_style_tracks_combat_stance() {
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        app.self_guid = Some(1342177744);
+        app.world.set_self(1342177744, "Hero".into());
+        // No stance set yet: NonCombat.
+        assert_eq!(app.self_motion_style(), acproto::motion::MOTION_STYLE);
+        // Sword-combat stance (low 16 = 0x003e): re-sent with the autonomous bit.
+        app.world.entities.get_mut(&1342177744).unwrap().style = 0x003E;
+        assert_eq!(app.self_motion_style(), 0x8000003E);
+        // Peace stance (low 16 = 0x003d).
+        app.world.entities.get_mut(&1342177744).unwrap().style = 0x003D;
+        assert_eq!(app.self_motion_style(), 0x8000003D);
+    }
+
     /// Regression for "the displayed target differs from the real one": the
     /// target list is sorted by distance and rebuilt every tick, so a bare
     /// index into it drifts to a different entity as they move. The target is
@@ -3403,6 +3755,7 @@ mod tests {
             style: 0,
             physics_state: 0,
             is_vendor: false,
+            use_radius: None,
             last_seen: Instant::now(),
         };
         // A is closer (5) than B (10). Target A.
@@ -3423,6 +3776,137 @@ mod tests {
             "target must stay A across the reorder, not drift to the new index-0"
         );
     }
+
+    /// Use a vendor from beyond its use distance: the server-issued
+    /// approach must turn in place first (no forward drift at a large yaw
+    /// error), then walk the character to within the stop distance, and
+    /// end with the approach cleared.
+    #[test]
+    fn approach_walks_to_target_and_arrives() {
+        use acproto::codec::Vec3;
+        use crate::movement::{HeldKeys, Movement, TICK};
+        use crate::world::Entity;
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        let cell = 0x0001_0000u32;
+        app.movement = Some(Movement::new(cell, Vec3 { x: 0.0, y: 0.0, z: 0.0 }));
+        let v = Entity {
+            guid: 900,
+            name: Some("A Vendor".into()),
+            cell,
+            pos: Vec3 { x: 10.0, y: 0.0, z: 0.0 },
+            rot: [1.0, 0.0, 0.0, 0.0],
+            is_player: false,
+            health: None,
+            health_max: None,
+            mana: None,
+            mana_max: None,
+            item_type: 0,
+            setup_id: None,
+            mtable_id: None,
+            model_parts: None,
+            motion_cmd: 0,
+            style: 0,
+            physics_state: 0,
+            is_vendor: true,
+            use_radius: Some(2.5),
+            last_seen: Instant::now(),
+        };
+        app.world.entities.insert(900, v);
+        app.approach = Some(acproto::motion::ApproachMotion {
+            movement_type: acproto::motion::movement_type::MOVE_TO_OBJECT,
+            target: 900,
+            cell,
+            pos: Vec3 { x: 10.0, y: 0.0, z: 0.0 },
+            distance: 2.5,
+        });
+        // The vendor sits 90 degrees to the right of heading 0 (facing
+        // +y): the first step turns in place without moving forward.
+        let mut held = HeldKeys::default();
+        app.approach_drive(&mut held, &mut true);
+        assert!(held.turn_right && !held.turn_left && !held.forward, "first step must turn in place");
+        // Drive the sim until the approach ends; the character must arrive
+        // within the use distance of the vendor.
+        let mut ticks = 0u32;
+        while app.approach.is_some() && ticks < 2000 {
+            let mut h = HeldKeys::default();
+            let mut walking = true;
+            app.approach_drive(&mut h, &mut walking);
+            let actions = app.movement.as_mut().unwrap().tick(TICK, &mut h, walking, Instant::now(), None, acproto::motion::MOTION_STYLE);
+            let _ = actions;
+            ticks += 1;
+        }
+        assert!(app.approach.is_none(), "approach must end");
+        let mv = app.movement.as_ref().unwrap();
+        let d = (mv.pos.x - 10.0).abs() + (mv.pos.y - 0.0).abs().max(0.0);
+        assert!(d <= 2.5 + 0.5, "stopped {d} u from the vendor");
+    }
+
+    /// Retail auto-close: an open vendor/loot window closes when the
+    /// player stands beyond the object's use distance, and stays open
+    /// within it (plus the anti-flap margin).
+    #[test]
+    fn windows_auto_close_beyond_use_radius() {
+        use acproto::codec::Vec3;
+        use crate::movement::Movement;
+        use crate::world::Entity;
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        let cell = 0x0001_0000u32;
+        app.movement = Some(Movement::new(cell, Vec3 { x: 0.0, y: 0.0, z: 0.0 }));
+        let ent = |guid: u32, x: f32, radius: Option<f32>| Entity {
+            guid,
+            name: None,
+            cell,
+            pos: Vec3 { x, y: 0.0, z: 0.0 },
+            rot: [1.0, 0.0, 0.0, 0.0],
+            is_player: false,
+            health: None,
+            health_max: None,
+            mana: None,
+            mana_max: None,
+            item_type: 0,
+            setup_id: None,
+            mtable_id: None,
+            model_parts: None,
+            motion_cmd: 0,
+            style: 0,
+            physics_state: 0,
+            is_vendor: false,
+            use_radius: radius,
+            last_seen: Instant::now(),
+        };
+        app.world.entities.insert(900, ent(900, 2.5, Some(3.0)));
+        app.world.entities.insert(700, ent(700, 9.0, Some(3.0)));
+        // The windows opened at these client distances: the vendor within
+        // its radius, the chest OUTSIDE it (the server's own position
+        // lagged the client's when it opened).
+        app.world.vendor.guid = 900;
+        app.vendor_open_dist = Some(2.5);
+        app.world.container.guid = 700;
+        app.container_open_dist = Some(9.0);
+        // Standing still: the vendor is inside radius; the chest is out of
+        // range but the player hasn't moved away from where the window
+        // opened, so it stays open too.
+        app.close_windows_out_of_range();
+        assert_eq!(app.world.vendor.guid, 900, "vendor within range must stay open");
+        assert_eq!(app.world.container.guid, 700, "chest at the open distance must stay open");
+        // Walk away: both are now past their radius and 0.5 u past their
+        // baseline: both close.
+        app.movement.as_mut().unwrap().pos.x = 50.0;
+        app.close_windows_out_of_range();
+        assert_eq!(app.world.vendor.guid, 0, "vendor out of range must close");
+        assert_eq!(app.world.container.guid, 0, "chest out of range must close");
+        // A chest opened out of range but approached (moved CLOSER than the
+        // open distance, then back out past the radius) still closes.
+        app.world.container.guid = 700;
+        app.container_open_dist = Some(9.0);
+        app.movement.as_mut().unwrap().pos.x = 6.0; // 3.0 u from chest: inside
+        app.close_windows_out_of_range();
+        assert_eq!(app.world.container.guid, 700, "inside radius stays open");
+        app.movement.as_mut().unwrap().pos.x = 13.0; // 4.0 u: past radius
+        app.close_windows_out_of_range();
+        assert_eq!(app.world.container.guid, 0, "moved away past radius closes");
+    }
+
 
     /// Regression for "targeting is flaky — hit a key to target, it works,
     /// then instantly untargets": the target was dropped the moment it fell
@@ -3458,6 +3942,7 @@ mod tests {
             style: 0,
             physics_state: 0,
             is_vendor: false,
+            use_radius: None,
             last_seen: Instant::now(),
         };
         // A creature 150 u away — beyond RADAR_RANGE (96). Out of the range
@@ -3522,6 +4007,7 @@ mod tests {
             style: 0,
             physics_state: 0,
             is_vendor: false,
+            use_radius: None,
             last_seen: Instant::now(),
         };
         // Target 7 is 150 u out (beyond RADAR_RANGE); entity 1 is 5 u in.
@@ -3760,6 +4246,7 @@ mod tests {
             is_vendor: false,
             motion_cmd: 0,
             physics_state: 0,
+            use_radius: None,
         }
     }
 
@@ -4020,5 +4507,78 @@ mod tests {
         app.set_item_target(400, crate::world::TARGET_ITEM_CONTAINER);
         app.dispatch(Incoming::ObjectDelete(400));
         assert_eq!(app.target(), None, "an item target on a deleted item must clear");
+    }
+
+    /// Regression: after an in-session teleport (e.g. `/telepoi`), the client
+    /// must re-send `LoginComplete` when it snaps to the new position. The
+    /// server holds the player in portal space (`Teleporting`) until that
+    /// message arrives, and while in portal space it silently drops every
+    /// position update — without the re-send, logout re-saves the teleport
+    /// drop instead of where the player actually walked to.
+    #[test]
+    fn teleport_snap_resends_login_complete() {
+        use acproto::codec::Vec3;
+        use crate::movement::Movement;
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        let cell = 0xC6A9_0009u32;
+        app.self_guid = Some(0x5000_00A8);
+        app.phase = Phase::InWorld;
+        app.movement = Some(Movement::new(
+            cell,
+            Vec3 { x: 46.8, y: 4.2, z: 42.0 },
+        ));
+        let before = app.client_seq;
+
+        // The S2C teleport message carries only a sequence, not a guid, and
+        // is self-directed — it must arm the snap regardless of the payload.
+        app.dispatch(Incoming::PlayerTeleport(7));
+        assert!(app.pending_teleport, "a self-directed teleport must arm the snap");
+
+        // The position update follows: the snap must land exactly on the
+        // received position and the LoginComplete action must go out
+        // (send_action consumes a client sequence even with no socket).
+        app.dispatch(Incoming::UpdatePosition(messages::UpdatePosition {
+            guid: 0x5000_00A8,
+            cell,
+            pos: Vec3 { x: 45.5, y: 25.5, z: 42.0 },
+            rot: acproto::codec::Quat { w: 1.0, x: 0.0, y: 0.0, z: 0.0 },
+            vel: None,
+            grounded: true,
+        }));
+        let p = app.movement.as_ref().expect("movement alive").current_position();
+        assert!(
+            (p.pos.x - 45.5).abs() < 0.001 && (p.pos.y - 25.5).abs() < 0.001,
+            "the teleport must snap exactly to the received position"
+        );
+        assert!(!app.pending_teleport, "the pending flag must be consumed by the snap");
+        assert!(
+            app.client_seq > before,
+            "LoginComplete must be re-sent after the teleport snap"
+        );
+    }
+
+    /// Clicking empty space deselects: the target clears and a single
+    /// QueryHealth(0) is sent to the server (retail). With no target it is a
+    /// no-op — no spurious deselect is sent.
+    #[test]
+    fn deselect_target_clears_and_notifies_server() {
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        app.phase = Phase::InWorld;
+        app.set_world_target(1);
+        assert!(app.target().is_some());
+
+        // A target is set: clears it and sends exactly one action
+        // (QueryHealth(0)).
+        let seq = app.client_seq;
+        app.deselect_target();
+        assert!(app.target().is_none());
+        assert!(app.world.target_health.is_none());
+        assert_eq!(app.client_seq, seq + 1, "deselect must send QueryHealth(0)");
+
+        // No target now: a second deselect is a no-op (no send).
+        let seq = app.client_seq;
+        app.deselect_target();
+        assert!(app.target().is_none());
+        assert_eq!(app.client_seq, seq, "no target -> no deselect sent");
     }
 }
