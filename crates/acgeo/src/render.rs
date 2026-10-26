@@ -1543,8 +1543,9 @@ pub fn render_frame(
     let draw_actors: &[Actor] = if first_person { &fp_actors } else { actors };
     let dyn_soup = build_dynamic_soup(scene, draw_actors, anim, doors, now);
     let prop_soup = scene.prop_soup(lb);
+    let building_soup = scene.building_soup(lb);
     let block_soup = scene.block_soup(lb);
-    if block_soup.map_or(true, |s| s.is_empty()) && dyn_soup.as_ref().map_or(true, |s| s.is_empty()) && env_soup.is_empty() && prop_soup.is_empty() {
+    if block_soup.map_or(true, |s| s.is_empty()) && dyn_soup.as_ref().map_or(true, |s| s.is_empty()) && env_soup.is_empty() && prop_soup.is_empty() && building_soup.is_empty() {
         return None;
     }
 
@@ -1619,6 +1620,35 @@ pub fn render_frame(
             cols,
             rows,
             &prop_soup,
+            None,
+            light,
+            fog_span,
+        );
+    }
+    // Building GfxObj visual meshes (the detailed multi-material model a
+    // town's shop is made of: walls + the interior props — paintings,
+    // barrels, lamps). Drawn only for the building whose region contains the
+    // camera: from inside, the env-cell shell that duplicates the building's
+    // outer walls is already skipped (cam_cell), so the interior shows with
+    // no wall z-fight; from outside, the env cells represent the building.
+    // The region is world-space, so the containment test is direct.
+    let inside_buildings: Vec<(u32, Aabb, Vec<f32>)> = building_soup
+        .iter()
+        .filter(|(_, r, _)| {
+            cam.x >= r[0] && cam.x <= r[3]
+                && cam.y >= r[1] && cam.y <= r[4]
+                && cam.z >= r[2] && cam.z <= r[5]
+        })
+        .cloned()
+        .collect();
+    if !inside_buildings.is_empty() {
+        raster_env_soup(
+            &mut cells,
+            &mut depth,
+            &basis,
+            cols,
+            rows,
+            &inside_buildings,
             None,
             light,
             fog_span,
