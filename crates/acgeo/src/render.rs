@@ -1542,9 +1542,8 @@ pub fn render_frame(
     };
     let draw_actors: &[Actor] = if first_person { &fp_actors } else { actors };
     let dyn_soup = build_dynamic_soup(scene, draw_actors, anim, doors, now);
-    let building_soup = scene.building_soup(lb);
     let block_soup = scene.block_soup(lb);
-    if block_soup.map_or(true, |s| s.is_empty()) && dyn_soup.as_ref().map_or(true, |s| s.is_empty()) && env_soup.is_empty() && building_soup.is_empty() {
+    if block_soup.map_or(true, |s| s.is_empty()) && dyn_soup.as_ref().map_or(true, |s| s.is_empty()) && env_soup.is_empty() {
         return None;
     }
 
@@ -1603,25 +1602,6 @@ pub fn render_frame(
             rows,
             env_soup,
             cam_cell,
-            light,
-            fog_span,
-        );
-    }
-    // Building GfxObj visual meshes: the full visual model of each LBI
-    // building — the interior detail (staircase, wall paintings, barrels,
-    // the lamp) that the env-cell soup's flat surfaces don't carry. Drawn
-    // after the env cells so the visual model sits on top of the cell shell;
-    // no cell is skipped (a building seen from inside must still show its
-    // walls + props, unlike the env shell which would wall in the room).
-    if !building_soup.is_empty() {
-        raster_env_soup(
-            &mut cells,
-            &mut depth,
-            &basis,
-            cols,
-            rows,
-            &building_soup,
-            None,
             light,
             fog_span,
         );
