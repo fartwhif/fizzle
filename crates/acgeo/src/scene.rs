@@ -84,6 +84,14 @@ pub struct Scene {
     /// the region lets the renderer skip the cell the camera is inside so a
     /// building shell doesn't wall in its interior. Cached.
     env_soups: HashMap<u32, Vec<(u32, Aabb, Vec<f32>)>>,
+    /// Placed GfxObj (0x01) prop visual meshes per landblock, one entry per
+    /// prop: `(model_id, drawn-vertex region AABB, soup)`. The soup is 12
+    /// floats/tri (3 world-space verts + rgb) from the GfxObj render mesh —
+    /// the furniture/barrels/lamps the renderer draws. Pass-through props
+    /// (no physics leaf) still get their visual mesh; only the `stabs` list
+    /// (placed props), never the `buildings` list (whose visual mesh z-fights
+    /// the env-cell shell). Cached.
+    prop_soups: HashMap<u32, Vec<(u32, Aabb, Vec<f32>)>>,
     /// Env (indoor/structure) cell physics solids per landblock (the walls
     /// that block movement; a town's walls exist only here — its LBI has no
     /// stabs). Triangles/bbox in the env cell's unwrapped placement frame;
@@ -134,6 +142,7 @@ impl Scene {
             solid_objs: HashMap::new(),
             env_regions: HashMap::new(),
             env_soups: HashMap::new(),
+            prop_soups: HashMap::new(),
             env_solid_objs: HashMap::new(),
             setup_parts_cache: HashMap::new(),
             mtable_cache: HashMap::new(),
@@ -346,6 +355,107 @@ impl Scene {
         }
         self.solid_objs.insert(lb, out.clone());
         out
+    }
+
+    /// The placed GfxObj (0x01) prop visual meshes for landblock `lb`, one
+    /// entry per prop: `(model_id, drawn-vertex region AABB, soup)`. The soup
+    /// is 12 floats/tri (3 world-space verts + rgb) from the GfxObj render
+    /// mesh — the furniture/barrels/lamps the renderer draws. Pass-through
+    /// props (no physics leaf) still get their visual mesh; a prop with a
+    /// solid physics leaf also blocks movement via [`Scene::solids_for_block`].
+    /// Only the LBI `stabs` list (placed props) is used, never `buildings`
+    /// (whose visual mesh z-fights the env-cell shell). Cached per landblock;
+    /// empty when the dats are unavailable or the block has no props.
+    #[must_use]
+    pub fn prop_soup(&mut self, lb: u32) -> Vec<(u32, Aabb, Vec<f32>)> {
+        if let Some(v) = self.prop_soups.get(&lb) {
+            return v.clone();
+        }
+        // Collect the raw GfxObj buffers first; the dat borrows must be
+        // released before the surface-color resolution below (which
+        // re-borrows the portal).
+        let mut raw: Vec<(u32, Frame, Vec<u8>)> = Vec::new();
+        if let (Some(cell), Some(portal)) = (self.cell.as_ref(), self.portal.as_ref()) {
+            if let Some(rec) = cell.borrow_mut().read(lb * 0x10000 + 0xfffe) {
+                if let Some(lbi) = acegeom::parse_landblock_info(&rec) {
+                    for s in &lbi.stabs {
+                        if s.id & 0xff000000 != 0x01000000 {
+                            continue;
+                        }
+                        let Some(buf) = portal.borrow_mut().read(s.id) else {
+                            continue;
+                        };
+                        raw.push((s.id, s.frame, buf));
+                    }
+                }
+            }
+        }
+        let mut soups: Vec<(u32, Aabb, Vec<f32>)> = Vec::new();
+        // Parse each mesh (world-space, resolved colors) and build the soup.
+        for (id, frame, buf) in &raw {
+            let Some(mesh) =
+                acegeom::parse_gfx_obj(buf, |cid| self.surface_color(cid), Some(frame))
+            else {
+                continue;
+            };
+            let n = mesh.pos.len() / 3;
+            if n == 0 || mesh.tris.is_empty() {
+                continue;
+            }
+            let mut soup: Vec<f32> = Vec::with_capacity(mesh.tri_mat.len() * 12);
+            for (j, &tm) in mesh.tri_mat.iter().enumerate() {
+                let (ia, ib, ic) = match (
+                    mesh.tris.get(3 * j).copied(),
+                    mesh.tris.get(3 * j + 1).copied(),
+                    mesh.tris.get(3 * j + 2).copied(),
+                ) {
+                    (Some(a), Some(b), Some(c)) => (a, b, c),
+                    _ => continue,
+                };
+                if ia as usize >= n || ib as usize >= n || ic as usize >= n {
+                    continue;
+                }
+                let color = mesh
+                    .mats
+                    .get(tm as usize)
+                    .copied()
+                    .unwrap_or(0xff808080);
+                let (cr, cg, cb) = (
+                    ((color >> 16) & 0xff) as f32,
+                    ((color >> 8) & 0xff) as f32,
+                    (color & 0xff) as f32,
+                );
+                let a = 3 * ia as usize;
+                let b = 3 * ib as usize;
+                let c = 3 * ic as usize;
+                soup.extend_from_slice(&[
+                    mesh.pos[a], mesh.pos[a + 1], mesh.pos[a + 2],
+                    mesh.pos[b], mesh.pos[b + 1], mesh.pos[b + 2],
+                    mesh.pos[c], mesh.pos[c + 1], mesh.pos[c + 2],
+                    cr, cg, cb,
+                ]);
+            }
+            if soup.is_empty() {
+                continue;
+            }
+            let region = {
+                let mut bb = [
+                    f32::INFINITY, f32::INFINITY, f32::INFINITY,
+                    f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY,
+                ];
+                for v in (0..soup.len()).step_by(12) {
+                    for k in 0..9 {
+                        let val = soup[v + k];
+                        bb[k % 3] = bb[k % 3].min(val);
+                        bb[3 + (k % 3)] = bb[3 + (k % 3)].max(val);
+                    }
+                }
+                bb
+            };
+            soups.push((*id, region, soup));
+        }
+        self.prop_soups.insert(lb, soups.clone());
+        soups
     }
 
     /// The env (indoor/structure) cells present in landblock `lb`, each with
@@ -930,6 +1040,39 @@ mod tests {
             for i in (0..soup.len()).step_by(12) {
                 for v in soup[i..i + 9].iter() {
                     assert!(v.is_finite());
+                }
+            }
+        }
+    }
+
+    /// A town landblock (0xc688, Rithwic) carries placed GfxObj (0x01) prop
+    /// stabs — furniture/barrels/lamps, some solid (block movement) and some
+    /// pass-through (no physics leaf). The prop soup is the renderer's source
+    /// for those visuals; a regression here means props are invisible. Guards:
+    /// non-empty, only 0x01 ids, whole 12-float tris, finite vertices, sane
+    /// region. (The pass-through props still appear — the soup is not gated on
+    /// the solid flag.)
+    #[test]
+    fn smoke_prop_soup() {
+        let Some(mut scene) = test_scene() else {
+            eprintln!("skipped: retail dats unavailable");
+            return;
+        };
+        assert!(scene.available());
+        let lb = 0xc688u32;
+        let soups = scene.prop_soup(lb);
+        assert!(!soups.is_empty(), "town landblock should have a prop soup");
+        for (id, region, soup) in &soups {
+            assert!(*id & 0xff000000 == 0x01000000, "prop should be a 0x01 GfxObj");
+            assert_eq!(soup.len() % 12, 0, "prop soup should be whole triangles");
+            assert!(!soup.is_empty(), "prop soup should be non-empty");
+            for ax in 0..3 {
+                assert!(region[ax].is_finite() && region[ax + 3].is_finite());
+                assert!(region[ax] <= region[ax + 3], "region min <= max");
+            }
+            for i in (0..soup.len()).step_by(12) {
+                for v in soup[i..i + 9].iter() {
+                    assert!(v.is_finite(), "prop vertex finite");
                 }
             }
         }

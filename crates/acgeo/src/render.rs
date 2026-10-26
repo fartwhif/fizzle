@@ -1542,8 +1542,9 @@ pub fn render_frame(
     };
     let draw_actors: &[Actor] = if first_person { &fp_actors } else { actors };
     let dyn_soup = build_dynamic_soup(scene, draw_actors, anim, doors, now);
+    let prop_soup = scene.prop_soup(lb);
     let block_soup = scene.block_soup(lb);
-    if block_soup.map_or(true, |s| s.is_empty()) && dyn_soup.as_ref().map_or(true, |s| s.is_empty()) && env_soup.is_empty() {
+    if block_soup.map_or(true, |s| s.is_empty()) && dyn_soup.as_ref().map_or(true, |s| s.is_empty()) && env_soup.is_empty() && prop_soup.is_empty() {
         return None;
     }
 
@@ -1602,6 +1603,23 @@ pub fn render_frame(
             rows,
             env_soup,
             cam_cell,
+            light,
+            fog_span,
+        );
+    }
+    // Placed GfxObj props (furniture/barrels/lamps): the full visual mesh,
+    // drawn after the env cells so interior props sit on top of the room.
+    // `cam_cell: None` — a prop is always drawn (unlike the env shell, which
+    // is skipped when the camera is inside so it doesn't wall in the room).
+    if !prop_soup.is_empty() {
+        raster_env_soup(
+            &mut cells,
+            &mut depth,
+            &basis,
+            cols,
+            rows,
+            &prop_soup,
+            None,
             light,
             fog_span,
         );
