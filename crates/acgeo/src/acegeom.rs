@@ -453,6 +453,8 @@ pub struct Surface {
     /// 0x00RRGGBB when solid.
     pub color: Option<u32>,
     pub texture_id: Option<u32>,
+    /// 0.0 = opaque, 1.0 = fully transparent (glass).
+    pub translucency: f32,
 }
 
 pub fn parse_surface(buf: &[u8]) -> Option<Surface> {
@@ -467,10 +469,14 @@ pub fn parse_surface(buf: &[u8]) -> Option<Surface> {
     } else {
         color = r.u32();
     }
-    r.f32()?; // Translucency
+    let translucency = r.f32()?; // Translucency
     r.f32()?; // Luminosity
     r.f32()?; // Diffuse
-    Some(Surface { color, texture_id })
+    Some(Surface {
+        color,
+        texture_id,
+        translucency,
+    })
 }
 
 /// SurfaceTexture (portal 0x05xxxxxx): an ordered list of texture data
@@ -878,8 +884,6 @@ pub struct Mesh {
     pub triangle_count: usize,
 }
 
-const MAT_UNKNOWN: u32 = 0xff000000;
-
 /// Build a Mesh from a GfxObj buffer. `surface_color` resolves a Surface
 /// data id (0x08xxxxxx) to a 0x00RRGGBB or `None`; `frame` optionally
 /// transforms the (model-space) geometry into world space.
@@ -943,22 +947,25 @@ pub fn parse_gfx_obj(
         return None;
     }
 
-    // resolve materials (cached per surface index)
-    let mut mat_of: Vec<Option<u32>> = vec![None; n_surfaces];
+    // resolve materials (cached per surface index). `None` = skip this
+    // winding: the surface has no resolvable color (a palette-only texture
+    // with no average) or it is glass — the Scene resolver returns `None`
+    // for translucency >= 0.5 so window orifices stay see-through.
+    let mut mat_of: Vec<Option<Option<u32>>> = vec![None; n_surfaces];
     let mut mat_ids: Vec<u32> = Vec::new();
-    let mut resolve = |surf_idx: i16| -> u16 {
-        let m = if (0..n_surfaces).contains(&((surf_idx as i64) as usize)) && surf_idx >= 0 {
-            let m = mat_of[surf_idx as usize].get_or_insert_with(|| {
-                surface_color(surface_ids[surf_idx as usize]).unwrap_or(MAT_UNKNOWN)
-            });
-            *m
-        } else {
-            MAT_UNKNOWN
-        };
-        if !mat_ids.contains(&m) {
-            mat_ids.push(m);
+    let mut resolve = |surf_idx: i16| -> Option<u16> {
+        if !((0..n_surfaces).contains(&((surf_idx as i64) as usize)) && surf_idx >= 0) {
+            return None;
         }
-        mat_ids.iter().position(|x| *x == m).unwrap() as u16
+        let m = mat_of[surf_idx as usize].get_or_insert_with(|| {
+            surface_color(surface_ids[surf_idx as usize])
+        });
+        m.as_ref().map(|&c| {
+            if !mat_ids.contains(&c) {
+                mat_ids.push(c);
+            }
+            mat_ids.iter().position(|x| *x == c).unwrap() as u16
+        })
     };
 
     // transform vertices to world space
@@ -974,18 +981,28 @@ pub fn parse_gfx_obj(
         pos.copy_from_slice(&vdata.pos);
     }
 
-    // fan-triangulate each polygon; emit both windings
+    // fan-triangulate each polygon; emit the front winding and, when a
+    // back surface is declared, the back winding. A polygon whose front
+    // surface is unresolvable or glass is skipped entirely.
     let mut tris: Vec<u32> = Vec::new();
     let mut tri_mat: Vec<u16> = Vec::new();
     for poly in &polys {
         if poly.num_pts < 3 {
             continue;
         }
-        let m_pos = resolve(poly.pos_surface);
-        let m_neg = if poly.sides_type == CULL_NONE {
-            m_pos
-        } else {
+        let Some(m_pos) = resolve(poly.pos_surface) else {
+            continue;
+        };
+        // Two-sided only when a back surface is declared: CULL_NONE reuses
+        // the front surface, CULL_CLOCKWISE names a distinct one. Any other
+        // neg_surface (e.g. -1) means the polygon is single-sided — emit
+        // only the front winding.
+        let back = if poly.sides_type == CULL_NONE {
+            Some(m_pos)
+        } else if poly.neg_surface >= 0 && (poly.neg_surface as usize) < n_surfaces {
             resolve(poly.neg_surface)
+        } else {
+            None
         };
         for i in 1..poly.num_pts - 1 {
             let a = slot_of(poly.vertex_ids[0] as u32 & 0xffff);
@@ -994,8 +1011,12 @@ pub fn parse_gfx_obj(
             if a < 0 || b < 0 || c < 0 {
                 continue;
             }
-            tris.extend_from_slice(&[a as u32, b as u32, c as u32, a as u32, c as u32, b as u32]);
-            tri_mat.extend_from_slice(&[m_pos, m_neg]);
+            tris.extend_from_slice(&[a as u32, b as u32, c as u32]);
+            tri_mat.extend_from_slice(&[m_pos]);
+            if let Some(m_neg) = back {
+                tris.extend_from_slice(&[a as u32, c as u32, b as u32]);
+                tri_mat.extend_from_slice(&[m_neg]);
+            }
         }
     }
 

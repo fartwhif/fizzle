@@ -189,6 +189,12 @@ impl Scene {
         let Some(surf) = acegeom::parse_surface(&buf) else {
             return None;
         };
+        // Glass (translucency >= 0.5) is not rendered: returning `None`
+        // makes the geometry builder skip the polygon, so window orifices
+        // stay see-through instead of painting opaque blue.
+        if surf.translucency >= 0.5 {
+            return None;
+        }
         if let Some(c) = surf.color {
             return Some(c);
         }
