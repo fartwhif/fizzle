@@ -32,6 +32,11 @@ pub type Aabb = [f32; 6];
 pub struct Solid {
     pub tris: Vec<f32>,
     pub bbox: Aabb,
+    /// True when this solid is a `buildings`-list GfxObj. Its detailed visual
+    /// mesh is drawn separately (the building soup), so the flat static box is
+    /// skipped in [`raster_statics`](crate::render) — drawing both z-fights.
+    /// Collision still uses the solid. False for props and env cells.
+    pub building: bool,
 }
 
 /// The world-geometry queries the movement sim runs its steps against

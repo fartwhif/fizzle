@@ -341,9 +341,16 @@ impl Scene {
         if let (Some(cell), Some(portal)) = (self.cell.as_ref(), self.portal.as_ref()) {
             if let Some(rec) = cell.borrow_mut().read(lb * 0x10000 + 0xfffe) {
                 if let Some(lbi) = acegeom::parse_landblock_info(&rec) {
-                    let mut ids: Vec<(u32, Frame)> = lbi.stabs.iter().map(|s| (s.id, s.frame)).collect();
-                    ids.extend(lbi.buildings.iter().copied());
-                    for (id, frame) in ids {
+                    // (model id, placement frame, is_a_building). Buildings
+                    // carry the same solid physics as props but are drawn as a
+                    // detailed visual mesh (the building soup), so their flat
+                    // static box must be skipped — tag them with `building`.
+                    let mut ids: Vec<(u32, Frame, bool)> =
+                        lbi.stabs.iter().map(|s| (s.id, s.frame, false)).collect();
+                    for (id, frame) in &lbi.buildings {
+                        ids.push((*id, *frame, true));
+                    }
+                    for (id, frame, building) in ids {
                         if id & 0xff000000 != 0x01000000 {
                             continue;
                         }
@@ -355,6 +362,7 @@ impl Scene {
                                 out.push(Solid {
                                     tris: phys.tris,
                                     bbox: phys.bbox,
+                                    building,
                                 });
                             }
                         }
@@ -913,7 +921,7 @@ impl Scene {
                 if tris.is_empty() || !bbox.iter().all(|v| v.is_finite()) {
                     continue;
                 }
-                out.push(Solid { tris, bbox });
+                out.push(Solid { tris, bbox, building: false });
             }
         }
         self.env_solid_objs.insert(lb, out.clone());

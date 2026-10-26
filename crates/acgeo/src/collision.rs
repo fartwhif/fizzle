@@ -213,6 +213,7 @@ mod tests {
         Solid {
             tris,
             bbox: [10.0, 0.0, 0.0, 10.0, 20.0, 5.0],
+            ..Default::default()
         }
     }
 
@@ -221,6 +222,7 @@ mod tests {
         Solid {
             tris: vec![x, 0.0, 0.0, x, 20.0, 0.0, x, 20.0, 5.0],
             bbox: [x, 0.0, 0.0, x, 20.0, 5.0],
+            ..Default::default()
         }
     }
 
@@ -298,6 +300,7 @@ mod tests {
                 193.0, -35.0, 0.0, 193.0, -25.0, 6.0, 193.0, -35.0, 6.0,
             ],
             bbox: [193.0, -35.0, 0.0, 193.0, -25.0, 6.0],
+            ..Default::default()
         };
         // Player at wrapped x = 191 walking +x across the seam: the k = 0
         // copy (x = 193) is crossed.
@@ -354,6 +357,7 @@ mod tests {
         let wall = Solid {
             tris: vec![191.5, 191.75, 0.0, 192.5, 191.75, 0.0, 192.5, 191.75, 5.0],
             bbox: [191.5, 191.75, 0.0, 192.5, 191.75, 5.0],
+            ..Default::default()
         };
         assert!(blocked(&[wall], &[], &HashMap::new(), 191.7, 191.7, 0.0, 192.3, 192.3, 0.0));
     }

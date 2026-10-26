@@ -751,6 +751,9 @@ fn raster_soup(
 
 /// Rasterize the static solids (physics triangles — no material, so a flat
 /// building color; both windings so backface culling keeps the visible side).
+/// A building solid the camera is inside is skipped: its detailed visual mesh
+/// (the building soup) is drawn in its place, and the flat box would z-fight
+/// it. From outside, the flat box is the building's only representation.
 fn raster_statics(
     cells: &mut [[u8; 3]],
     depth: &mut [f32],
@@ -758,10 +761,18 @@ fn raster_statics(
     cols: usize,
     rows: usize,
     statics: &[Solid],
+    cam: &Camera,
     light: (f32, f32, f32),
     fog_span: f32,
 ) {
     for s in statics {
+        if s.building
+            && cam.x >= s.bbox[0] && cam.x <= s.bbox[3]
+            && cam.y >= s.bbox[1] && cam.y <= s.bbox[4]
+            && cam.z >= s.bbox[2] && cam.z <= s.bbox[5]
+        {
+            continue;
+        }
         let tris = &s.tris;
         let n = tris.len() / 9 * 9;
         for i in (0..n).step_by(9) {
@@ -1587,7 +1598,7 @@ pub fn render_frame(
         }
     }
     if !statics.is_empty() {
-        raster_statics(&mut cells, &mut depth, &basis, cols, rows, statics, light, fog_span);
+        raster_statics(&mut cells, &mut depth, &basis, cols, rows, statics, cam, light, fog_span);
     }
     // Env (indoor/structure) cells: the walls/ceiling/floor of the current
     // landblock's rooms. Rasterized after the statics so indoor geometry
@@ -1795,6 +1806,7 @@ mod tests {
                 80.0, 90.0, 0.0, 112.0, 90.0, 10.0, 80.0, 90.0, 10.0,
             ],
             bbox: [80.0, 90.0, 0.0, 112.0, 90.0, 10.0],
+            ..Default::default()
         };
         // A floor so the frame has geometry to draw (no nothing-to-draw return).
         let floor: Vec<f32> = vec![
@@ -1868,6 +1880,7 @@ mod tests {
         Solid {
             tris: vec![10.0, 0.0, 0.0, 10.0, 20.0, 0.0, 10.0, 20.0, 5.0],
             bbox: [10.0, 0.0, 0.0, 10.0, 20.0, 5.0],
+            ..Default::default()
         }
     }
 
