@@ -1480,6 +1480,41 @@ pub fn parse_setup_parts(buf: &[u8]) -> Option<Vec<u32>> {
     Some(parts)
 }
 
+/// The embedded per-part static pose of a non-animated SetupModel: a 16-byte
+/// header (`[0, 0, 1, 0]`), then one Frame (x,y,z,qw,qx,qy,qz) per part, in
+/// part order. Present on the static staircases — it is the parts' model-space
+/// placement (the stringers, the treads rising ~0.25 per step, the top
+/// landing). `None` when the bytes after the header don't look like per-part
+/// frames (the quaternions aren't ~unit), so callers fall back to identity.
+pub fn parse_setup_part_frames(buf: &[u8]) -> Option<Vec<Frame>> {
+    let mut r = R::new(buf);
+    r.u32()?; // Id
+    let flags = r.u32()?;
+    let n = r.u32()? as usize;
+    if n == 0 {
+        return None;
+    }
+    r.bytes(4 * n)?; // parts
+    if flags & 0x1 != 0 {
+        r.bytes(4 * n)?; // parentIndex
+    }
+    if flags & 0x2 != 0 {
+        r.bytes(12 * n)?; // defaultScale
+    }
+    // 16-byte header before the frames: [0, 0, numKeyframes, 0].
+    r.bytes(16)?;
+    let mut frames = Vec::with_capacity(n);
+    for _ in 0..n {
+        let f = read_frame(&mut r)?;
+        let q2 = f.qw * f.qw + f.qx * f.qx + f.qy * f.qy + f.qz * f.qz;
+        if !(0.5..=2.0).contains(&q2) {
+            return None;
+        }
+        frames.push(f);
+    }
+    Some(frames)
+}
+
 /// The 5 trailing data ids of a SetupModel record (all at the end of the
 /// buffer): DefaultAnimation, DefaultScript, DefaultMotionTable,
 /// DefaultSoundTable, DefaultScriptTable. All zero for the base human
