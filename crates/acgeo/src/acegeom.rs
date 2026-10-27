@@ -1237,16 +1237,21 @@ pub struct EnvCell {
     /// Index into the Environment's Cells.
     pub cell_structure: u16,
     pub position: Frame,
+    /// Statics placed inside the cell (props: stairs/candlesticks/paintings,
+    /// plus SetupModel characters). Frames are block-local (world) space —
+    /// not the cell's local frame — so they are drawn directly. Present only
+    /// when the `0x2` (HasStaticObjs) flag is set.
+    pub statics: Vec<Stab>,
 }
 
 pub fn parse_env_cell(buf: &[u8]) -> Option<EnvCell> {
     let mut r = R::new(buf);
     r.u32()?; // Id
     let flags = r.u32()?;
-    r.bytes(4)?; // CellId again
+    r.u32()?; // Id again
     let num_surfaces = r.u8()?;
     let num_portals = r.u8()?;
-    let num_stabs = r.u16()?;
+    let num_visible = r.u16()?;
     let mut surface_ids = Vec::with_capacity(num_surfaces as usize);
     for _ in 0..num_surfaces {
         surface_ids.push(0x08000000 | r.u16()? as u32);
@@ -1257,16 +1262,16 @@ pub fn parse_env_cell(buf: &[u8]) -> Option<EnvCell> {
     for _ in 0..num_portals {
         r.bytes(8)?; // CellPortal
     }
-    for _ in 0..num_stabs {
+    for _ in 0..num_visible {
         r.u16()?; // VisibleCells
     }
+    let mut statics = Vec::new();
     if flags & 0x2 != 0 {
         let n = r.u32()?;
-        for _ in 0..n {
-            r.u32()?;
-            r.bytes(16)?; // Stab frame
-        }
+        statics = read_stabs(&mut r, n)?;
     }
+    // `0x4` (dynamic spawns) is server-only and absent from the client cell
+    // dat; `0x8` is a restriction instance id.
     if flags & 0x8 != 0 {
         r.u32()?;
     }
@@ -1276,6 +1281,7 @@ pub fn parse_env_cell(buf: &[u8]) -> Option<EnvCell> {
         environment_id,
         cell_structure,
         position,
+        statics,
     })
 }
 

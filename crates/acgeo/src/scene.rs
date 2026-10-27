@@ -100,6 +100,12 @@ pub struct Scene {
     /// duplicates the building's outer walls is already skipped, so the
     /// interior shows with no z-fight; from outside the env cells represent it.
     building_soups: HashMap<u32, Vec<(u32, Aabb, Vec<f32>)>>,
+    /// GfxObj (0x01) statics placed inside the env (indoor) cells per
+    /// landblock — the shop's interior props (stairs, candlesticks,
+    /// paintings). 12 floats/tri (3 world-space verts + rgb). The env-cell
+    /// statics' frames are block-local (world) space, so they are drawn
+    /// directly, like the LBI `stabs`. Cached.
+    env_prop_soups: HashMap<u32, Vec<(u32, Aabb, Vec<f32>)>>,
     /// Env (indoor/structure) cell physics solids per landblock (the walls
     /// that block movement; a town's walls exist only here — its LBI has no
     /// stabs). Triangles/bbox in the env cell's unwrapped placement frame;
@@ -152,6 +158,7 @@ impl Scene {
             env_soups: HashMap::new(),
             prop_soups: HashMap::new(),
             building_soups: HashMap::new(),
+            env_prop_soups: HashMap::new(),
             env_solid_objs: HashMap::new(),
             setup_parts_cache: HashMap::new(),
             mtable_cache: HashMap::new(),
@@ -575,6 +582,128 @@ impl Scene {
         self.building_soups.insert(lb, soups.clone());
         soups
     }
+
+    /// The GfxObj (0x01) statics placed inside the landblock's env (indoor)
+    /// cells: the shop's interior props — the staircase, candlesticks,
+    /// paintings, barrels. Each env cell carries a `statics` list (its
+    /// `0x2` HasStaticObjs payload); the GfxObj entries are rendered here,
+    /// 12 floats/tri (3 world-space verts + rgb) with their region AABB. The
+    /// static frames are block-local (world) space — not the cell's local
+    /// frame — so they are drawn directly (like the LBI `stabs`). Mirrors
+    /// [`Scene::prop_soup`] but reads the env cells instead of the LBI.
+    /// SetupModel (0x02) entries are the room's characters, not props, and
+    /// are skipped. Cached per landblock; empty when the dats are
+    /// unavailable or the block's env cells carry no GfxObj statics.
+    #[must_use]
+    pub fn env_props(&mut self, lb: u32) -> Vec<(u32, Aabb, Vec<f32>)> {
+        if let Some(v) = self.env_prop_soups.get(&lb) {
+            return v.clone();
+        }
+        // Collect the raw GfxObj buffers first; the dat borrows must be
+        // released before the surface-color resolution below (which
+        // re-borrows the portal).
+        let mut raw: Vec<(u32, Frame, Vec<u8>)> = Vec::new();
+        if let (Some(cell), Some(portal)) = (self.cell.as_ref(), self.portal.as_ref()) {
+            let lo = lb * 0x10000 + 0x100;
+            let hi = lb * 0x10000 + 0xFFFD;
+            let mut ids: Vec<u32> = Vec::new();
+            {
+                let dir = cell.borrow();
+                let keys = dir.ids();
+                let start = keys.partition_point(|&k| k < lo);
+                for &id in &keys[start..] {
+                    if id > hi {
+                        break;
+                    }
+                    ids.push(id);
+                }
+            }
+            for id in ids {
+                let Some(rec) = cell.borrow_mut().read(id) else {
+                    continue;
+                };
+                let Some(ce) = acegeom::parse_env_cell(&rec) else {
+                    continue;
+                };
+                for s in &ce.statics {
+                    if s.id & 0xff000000 != 0x01000000 {
+                        continue;
+                    }
+                    let Some(buf) = portal.borrow_mut().read(s.id) else {
+                        continue;
+                    };
+                    raw.push((s.id, s.frame, buf));
+                }
+            }
+        }
+        let mut soups: Vec<(u32, Aabb, Vec<f32>)> = Vec::new();
+        // Parse each mesh (world-space, resolved colors) and build the soup.
+        for (id, frame, buf) in &raw {
+            let Some(mesh) =
+                acegeom::parse_gfx_obj(buf, |cid| self.surface_color(cid), Some(frame))
+            else {
+                continue;
+            };
+            let n = mesh.pos.len() / 3;
+            if n == 0 || mesh.tris.is_empty() {
+                continue;
+            }
+            let mut soup: Vec<f32> = Vec::with_capacity(mesh.tri_mat.len() * 12);
+            for (j, &tm) in mesh.tri_mat.iter().enumerate() {
+                let (ia, ib, ic) = match (
+                    mesh.tris.get(3 * j).copied(),
+                    mesh.tris.get(3 * j + 1).copied(),
+                    mesh.tris.get(3 * j + 2).copied(),
+                ) {
+                    (Some(a), Some(b), Some(c)) => (a, b, c),
+                    _ => continue,
+                };
+                if ia as usize >= n || ib as usize >= n || ic as usize >= n {
+                    continue;
+                }
+                let color = mesh
+                    .mats
+                    .get(tm as usize)
+                    .copied()
+                    .unwrap_or(0xff808080);
+                let (cr, cg, cb) = (
+                    ((color >> 16) & 0xff) as f32,
+                    ((color >> 8) & 0xff) as f32,
+                    (color & 0xff) as f32,
+                );
+                let a = 3 * ia as usize;
+                let b = 3 * ib as usize;
+                let c = 3 * ic as usize;
+                soup.extend_from_slice(&[
+                    mesh.pos[a], mesh.pos[a + 1], mesh.pos[a + 2],
+                    mesh.pos[b], mesh.pos[b + 1], mesh.pos[b + 2],
+                    mesh.pos[c], mesh.pos[c + 1], mesh.pos[c + 2],
+                    cr, cg, cb,
+                ]);
+            }
+            if soup.is_empty() {
+                continue;
+            }
+            let region = {
+                let mut bb = [
+                    f32::INFINITY, f32::INFINITY, f32::INFINITY,
+                    f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY,
+                ];
+                for v in (0..soup.len()).step_by(12) {
+                    for k in 0..9 {
+                        let val = soup[v + k];
+                        bb[k % 3] = bb[k % 3].min(val);
+                        bb[3 + (k % 3)] = bb[3 + (k % 3)].max(val);
+                    }
+                }
+                bb
+            };
+            soups.push((*id, region, soup));
+        }
+        self.env_prop_soups.insert(lb, soups.clone());
+        soups
+    }
+
 
     /// The env (indoor/structure) cells present in landblock `lb`, each with
     /// its block-local region AABB (the environment's drawing geometry

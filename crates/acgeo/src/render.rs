@@ -1555,8 +1555,12 @@ pub fn render_frame(
     let dyn_soup = build_dynamic_soup(scene, draw_actors, anim, doors, now);
     let prop_soup = scene.prop_soup(lb);
     let building_soup = scene.building_soup(lb);
+    // The GfxObj statics placed inside the env cells — the shop's interior
+    // props (stairs, candlesticks, paintings). Drawn last of the geometry so
+    // they sit on top of the room's walls/floor.
+    let env_props = scene.env_props(lb);
     let block_soup = scene.block_soup(lb);
-    if block_soup.map_or(true, |s| s.is_empty()) && dyn_soup.as_ref().map_or(true, |s| s.is_empty()) && env_soup.is_empty() && prop_soup.is_empty() && building_soup.is_empty() {
+    if block_soup.map_or(true, |s| s.is_empty()) && dyn_soup.as_ref().map_or(true, |s| s.is_empty()) && env_soup.is_empty() && prop_soup.is_empty() && building_soup.is_empty() && env_props.is_empty() {
         return None;
     }
 
@@ -1600,21 +1604,44 @@ pub fn render_frame(
     if !statics.is_empty() {
         raster_statics(&mut cells, &mut depth, &basis, cols, rows, statics, cam, light, fog_span);
     }
+    // The building whose region contains the camera: from inside, the
+    // detailed GfxObj mesh (building_soup) is the building's representation,
+    // so the env-cell slabs that overlap its footprint are skipped — they
+    // paint flat grey (unresolved-texture) over the interior, including the
+    // staircase. From outside, the env cells represent the building.
+    let inside_buildings: Vec<(u32, Aabb, Vec<f32>)> = building_soup
+        .iter()
+        .filter(|(_, r, _)| {
+            cam.x >= r[0] && cam.x <= r[3]
+                && cam.y >= r[1] && cam.y <= r[4]
+                && cam.z >= r[2] && cam.z <= r[5]
+        })
+        .cloned()
+        .collect();
     // Env (indoor/structure) cells: the walls/ceiling/floor of the current
-    // landblock's rooms. Rasterized after the statics so indoor geometry
-    // draws on top of the outdoor buildings. The cell the player stands in is
-    // skipped: that shell (double-sided walls + ceiling) would otherwise wall
-    // in the interior and obscure the room.
+    // landblock's rooms. The cell the player stands in is skipped (its shell
+    // would wall in the interior); env cells overlapping an inside building's
+    // footprint are also skipped (they'd paint over the building mesh).
     let cam_cell = env_cell_at(env_soup, cam);
-    if !env_soup.is_empty() {
+    let env_to_draw: Vec<(u32, Aabb, Vec<f32>)> = env_soup
+        .iter()
+        .filter(|(c, r, _)| {
+            Some(*c) != cam_cell
+                && !inside_buildings.iter().any(|(_, br, _)| {
+                    r[0] < br[3] && r[3] > br[0] && r[1] < br[4] && r[4] > br[1]
+                })
+        })
+        .cloned()
+        .collect();
+    if !env_to_draw.is_empty() {
         raster_env_soup(
             &mut cells,
             &mut depth,
             &basis,
             cols,
             rows,
-            env_soup,
-            cam_cell,
+            &env_to_draw,
+            None,
             light,
             fog_span,
         );
@@ -1643,15 +1670,6 @@ pub fn render_frame(
     // outer walls is already skipped (cam_cell), so the interior shows with
     // no wall z-fight; from outside, the env cells represent the building.
     // The region is world-space, so the containment test is direct.
-    let inside_buildings: Vec<(u32, Aabb, Vec<f32>)> = building_soup
-        .iter()
-        .filter(|(_, r, _)| {
-            cam.x >= r[0] && cam.x <= r[3]
-                && cam.y >= r[1] && cam.y <= r[4]
-                && cam.z >= r[2] && cam.z <= r[5]
-        })
-        .cloned()
-        .collect();
     if !inside_buildings.is_empty() {
         raster_env_soup(
             &mut cells,
@@ -1660,6 +1678,22 @@ pub fn render_frame(
             cols,
             rows,
             &inside_buildings,
+            None,
+            light,
+            fog_span,
+        );
+    }
+    // The GfxObj statics placed inside the env cells (the shop's interior
+    // props: stairs, candlesticks, paintings). Drawn last of the geometry so
+    // they sit on top of the room's walls/floor/building mesh.
+    if !env_props.is_empty() {
+        raster_env_soup(
+            &mut cells,
+            &mut depth,
+            &basis,
+            cols,
+            rows,
+            &env_props,
             None,
             light,
             fog_span,
