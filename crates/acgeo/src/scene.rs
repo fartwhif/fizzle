@@ -215,10 +215,30 @@ impl Scene {
             if portal.borrow_mut().find(t).is_none() {
                 continue;
             }
-            if let Some(buf) = portal.borrow_mut().read(t) {
-                if let Some(avg) = acegeom::parse_texture_average(&buf, 512, 4096) {
-                    return Some(avg);
+            let Some(buf) = portal.borrow_mut().read(t) else {
+                continue;
+            };
+            // Paletted (format 101): each 2-byte pixel is a u16-LE index into
+            // the palette named by the record's trailing id. Resolve via that
+            // palette — the raw bytes are indices, not RGB, so averaging them
+            // directly yields the wrong (all-blue) tint.
+            if let Some(pal_id) = acegeom::parse_texture_palette_id(&buf) {
+                if let Some(pal) = portal.borrow_mut().read(pal_id) {
+                    if buf.len() >= 24 {
+                        let len =
+                            i32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]) as usize;
+                        if buf.len() >= 24 + len {
+                            if let Some(avg) =
+                                acegeom::average_paletted(&buf[24..24 + len], &pal, 4096)
+                            {
+                                return Some(avg);
+                            }
+                        }
+                    }
                 }
+            }
+            if let Some(avg) = acegeom::parse_texture_average(&buf, 512, 4096) {
+                return Some(avg);
             }
         }
         None
@@ -338,8 +358,78 @@ impl Scene {
         let z10 = grid[(i0 + 1) * 9 + j0];
         let z01 = grid[i0 * 9 + j0 + 1];
         let z11 = grid[(i0 + 1) * 9 + j0 + 1];
-        Some((z00 * (1.0 - tx) + z10 * tx) * (1.0 - ty) + (z01 * (1.0 - tx) + z11 * tx) * ty)
+        let mut z = (z00 * (1.0 - tx) + z10 * tx) * (1.0 - ty) + (z01 * (1.0 - tx) + z11 * tx) * ty;
+        // A stair is a stack of flat step boxes (env-cell statics). The
+        // terrain grid has no stair, so the knee ray sits under the step and
+        // the stair blocks like a wall. When the foot is over an upward-
+        // facing, near-flat step top that rises a stair's height (0.2..4.0u)
+        // above the terrain, lift to that top so the character climbs.
+        // [`stair_top_at`] only considers stair model ids, so tall furniture
+        // (a 3u candlestick) in the same band never snaps the foot.
+        if let Some(top) = self.stair_top_at(lb, gx, gy, z) {
+            if (0.2..4.0).contains(&(top - z)) {
+                z = top;
+            }
+        }
+        Some(z)
     }
+
+    /// The z of the highest upward-facing, near-flat top of a *stair* prop
+    /// that contains block-local `(gx, gy)` and rises above `terrain_z` — a
+    /// step the character can stand on. `None` when the foot is over no such
+    /// step. Only the stair model ids (the `0x0100081a` step box and the
+    /// `0x02` multi-part staircase setups) are considered, so candlesticks,
+    /// barrels, and other furniture never snap the foot even when their tops
+    /// sit in the same height band as a step. A tri counts as a step top when
+    /// it is near-flat (own z-range < 0.3) and faces up; the stair's vertical
+    /// side walls never do.
+    fn stair_top_at(&mut self, lb: u32, gx: f32, gy: f32, terrain_z: f32) -> Option<f32> {
+        let mut best: Option<f32> = None;
+        for (id, _region, soup) in self.env_props(lb) {
+            let tag = id & 0xff000000;
+            let is_stair = id == 0x0100081a || tag == 0x02000000;
+            if !is_stair {
+                continue;
+            }
+            for o in (0..soup.len()).step_by(12) {
+                let ax = soup[o];
+                let ay = soup[o + 1];
+                let az = soup[o + 2];
+                let bx = soup[o + 3];
+                let by = soup[o + 4];
+                let bz = soup[o + 5];
+                let cx = soup[o + 6];
+                let cy = soup[o + 7];
+                let cz = soup[o + 8];
+                let zmin = az.min(bz).min(cz);
+                let zmax = az.max(bz).max(cz);
+                if zmax - zmin >= 0.3 || zmax <= terrain_z + 0.1 {
+                    continue;
+                }
+                let xmin = ax.min(bx).min(cx);
+                let xmax = ax.max(bx).max(cx);
+                let ymin = ay.min(by).min(cy);
+                let ymax = ay.max(by).max(cy);
+                // Test the tri and its copies across the block seam, like the
+                // periodic `ray_blocked`.
+                for dx in [0.0f32, BLOCK_LEN, -BLOCK_LEN] {
+                    for dy in [0.0f32, BLOCK_LEN, -BLOCK_LEN] {
+                        if xmin + dx <= gx
+                            && gx <= xmax + dx
+                            && ymin + dy <= gy
+                            && gy <= ymax + dy
+                        {
+                            best = Some(best.map_or(zmax, |b: f32| b.max(zmax)));
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+
+
+
 
     /// The static solid geometry of a landblock: every stab/building GfxObj
     /// (0x01 model) with a solid physics leaf — world-space block-frame
@@ -634,23 +724,86 @@ impl Scene {
                         };
                         raw.push((s.id, s.frame, buf));
                     } else if tag == 0x02000000 {
-                        // SetupModel static: a shop's furniture (stairs,
-                        // candlestick, paintings, barrels) is a 1-part setup —
-                        // its single part is a GfxObj placed at the static's
-                        // frame. Multi-part setups are characters, not props.
+                        // SetupModel static. A shop's furniture (candlestick,
+                        // paintings, barrels) is a 1-part setup — its single
+                        // part is a GfxObj placed at the static's frame. A
+                        // multi-part setup is a static staircase when it
+                        // repeats the step box (0x0100081a); otherwise it is a
+                        // character (live NPCs come from the wire, so an
+                        // env-cell multi-part setup is static) and is skipped.
                         let Some(setup) = portal.borrow_mut().read(s.id) else {
                             continue;
                         };
                         let Some(parts) = acegeom::parse_setup_parts(&setup) else {
                             continue;
                         };
-                        if parts.len() != 1 {
+                        let is_staircase =
+                            parts.iter().filter(|&&p| p == 0x0100081a).count() >= 3;
+                        if !(parts.len() == 1 || is_staircase) {
                             continue;
                         }
-                        let Some(buf) = portal.borrow_mut().read(parts[0]) else {
-                            continue;
+                        // Resolve the pose: a 1-part setup sits at the static
+                        // frame with an identity pose; a staircase takes its
+                        // row-0 part frames from its DefaultAnimation, each
+                        // composed with the static frame.
+                        let (pos_frame, part_frames) = if is_staircase {
+                            acegeom::parse_setup_tail(&setup)
+                                .and_then(|t| {
+                                    if t[0] == 0 {
+                                        None
+                                    } else {
+                                        portal
+                                            .borrow_mut()
+                                            .read(t[0])
+                                            .as_deref()
+                                            .and_then(acegeom::parse_animation)
+                                    }
+                                })
+                                .map(|a| {
+                                    let pos = match &a.pos_frames {
+                                        Some(pf) if pf.len() >= 7 => Frame::new(
+                                            pf[0], pf[1], pf[2], pf[3], pf[4], pf[5], pf[6],
+                                        ),
+                                        _ => IDENTITY,
+                                    };
+                                    let pfs: Vec<Frame> = (0..a.num_parts)
+                                        .map(|pi| {
+                                            let o = pi * 7;
+                                            if o + 7 <= a.part_frames.len() {
+                                                Frame::new(
+                                                    a.part_frames[o],
+                                                    a.part_frames[o + 1],
+                                                    a.part_frames[o + 2],
+                                                    a.part_frames[o + 3],
+                                                    a.part_frames[o + 4],
+                                                    a.part_frames[o + 5],
+                                                    a.part_frames[o + 6],
+                                                )
+                                            } else {
+                                                IDENTITY
+                                            }
+                                        })
+                                        .collect();
+                                    (pos, pfs)
+                                })
+                                .unwrap_or((
+                                    IDENTITY,
+                                    (0..parts.len()).map(|_| IDENTITY).collect(),
+                                ))
+                        } else {
+                            (IDENTITY, vec![IDENTITY])
                         };
-                        raw.push((s.id, s.frame, buf));
+                        let n_parts = if is_staircase { parts.len() } else { 1 };
+                        for (pi, &part_id) in parts.iter().enumerate().take(n_parts) {
+                            let Some(buf) = portal.borrow_mut().read(part_id) else {
+                                continue;
+                            };
+                            let pf = part_frames.get(pi).copied().unwrap_or(IDENTITY);
+                            let (q, t) = acegeom::compose3(&s.frame, &pos_frame, &pf);
+                            let world =
+                                Frame::new(t[0], t[1], t[2], q[0], q[1], q[2], q[3]);
+                            raw.push((s.id, world, buf));
+                        }
                     }
                 }
             }
@@ -861,6 +1014,13 @@ impl Scene {
                     .copied()
                     .unwrap_or(0);
                 // Skip AC's invisible surfaces, keyed on surface structure:
+                //  - glass (translucency >= 0.5): `surface_color_fresh`
+                //    returns `None` for it, and the geometry builders skip a
+                //    polygon whose front surface resolves `None`, so window /
+                //    doorway orifices stay see-through instead of painting a
+                //    flat grey slab (the env-cell's orifice surface carries a
+                //    0xff solid color, so the no-color/no-texture and 0xff
+                //    rules below would otherwise miss it), and
                 //  - a solid/texture-avg color carrying the 0xff top byte
                 //    (case 1: solid 0xff filler; case 3: texture with a
                 //    resolved average — in 0x8502 these floor/ceiling planes
@@ -881,6 +1041,9 @@ impl Scene {
                     None
                 };
                 let surf_color = self.surface_color(surf_id);
+                if surf.is_some_and(|s| s.translucency >= 0.5) {
+                    continue;
+                }
                 if surf.is_some_and(|s| s.color.is_none() && s.texture_id.is_none()) {
                     continue;
                 }

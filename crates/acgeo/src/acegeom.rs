@@ -664,6 +664,70 @@ pub fn parse_texture_average(buf: &[u8], blocks: usize, max_pixels: usize) -> Op
     )
 }
 
+/// The trailing palette id of a paletted texture record (format 101: 2 bytes
+/// per pixel, each a u16-LE index into a 2048-entry palette), or `None` when
+/// the record is not that format. The palette id is the final 4-byte field
+/// after the pixel payload.
+pub fn parse_texture_palette_id(buf: &[u8]) -> Option<u32> {
+    let mut r = R::new(buf);
+    r.u32()?; // Id
+    r.i32()?; // flags
+    r.i32()?; // width
+    r.i32()?; // height
+    if r.u32()? != 101 {
+        return None;
+    }
+    if buf.len() < 4 {
+        return None;
+    }
+    Some(u32::from_le_bytes([
+        buf[buf.len() - 4],
+        buf[buf.len() - 3],
+        buf[buf.len() - 2],
+        buf[buf.len() - 1],
+    ]))
+}
+
+/// Average color of a paletted texture payload (format 101). `data` is the
+/// pixel bytes (2/pixel, u16-LE palette index); `palette` is the palette
+/// record (8-byte id+count header then `count` RGBA entries). Returns
+/// `None` on a corrupt index or short buffer.
+pub fn average_paletted(data: &[u8], palette: &[u8], max_pixels: usize) -> Option<u32> {
+    if palette.len() < 8 {
+        return None;
+    }
+    let count = u32::from_le_bytes([palette[4], palette[5], palette[6], palette[7]]) as usize;
+    if 8 + count * 4 > palette.len() {
+        return None;
+    }
+    let mut rs: u64 = 0;
+    let mut gs: u64 = 0;
+    let mut bs: u64 = 0;
+    let mut n: u64 = 0;
+    let mut i = 0;
+    while i + 1 < data.len() && n < max_pixels as u64 {
+        let idx = u16::from_le_bytes([data[i], data[i + 1]]) as usize;
+        if idx >= count {
+            return None;
+        }
+        let o = 8 + idx * 4;
+        rs += palette[o] as u64;
+        gs += palette[o + 1] as u64;
+        bs += palette[o + 2] as u64;
+        n += 1;
+        i += 2;
+    }
+    if n == 0 {
+        return None;
+    }
+    Some(
+        0xff000000
+            | (((rs / n) as u32) << 16)
+            | (((gs / n) as u32) << 8)
+            | (bs / n) as u32,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // polygons and vertex arrays (mesh geometry)
 // ---------------------------------------------------------------------------
