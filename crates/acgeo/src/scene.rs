@@ -712,15 +712,30 @@ impl Scene {
                     .get(poly.pos_surface as usize)
                     .copied()
                     .unwrap_or(0);
-                let surf_color = if surf_id != 0 {
-                    self.surface_color(surf_id)
+                // Skip AC's invisible surfaces, keyed on surface structure:
+                //  - a solid/texture-avg color carrying the 0xff top byte
+                //    (case 1: solid 0xff filler; case 3: texture with a
+                //    resolved average — in 0x8502 these floor/ceiling planes
+                //    blanket the frame, so HEAD's blanket 0xff skip is
+                //    required for the town test), and
+                //  - a surface with neither a color nor a texture (the flat
+                //    plane that otherwise covers a doorway orifice as a grey
+                //    slab).
+                // A texture-present surface whose average is unresolved (case 4)
+                // is real geometry (town walls) and draws with the fallback.
+                let surf = if surf_id != 0 {
+                    self.portal.as_ref().and_then(|p| {
+                        p.borrow_mut()
+                            .read(surf_id)
+                            .and_then(|b| acegeom::parse_surface(&b))
+                    })
                 } else {
                     None
                 };
-                // Skip solid surfaces carrying the 0xff special flag (top
-                // byte): AC's invisible portal/trigger/filler planes. Drawing
-                // them turns a building's doorway orifice into a flat colored
-                // slab (blue/grey) instead of an open passage.
+                let surf_color = self.surface_color(surf_id);
+                if surf.is_some_and(|s| s.color.is_none() && s.texture_id.is_none()) {
+                    continue;
+                }
                 if surf_color.is_some_and(|c| (c >> 24) == 0xff) {
                     continue;
                 }

@@ -572,8 +572,10 @@ pub fn parse_texture_average(buf: &[u8], blocks: usize, max_pixels: usize) -> Op
                 i += 4;
             }
         }
-        23 => {
-            // PFID_R5G6B5
+        23 | 101 => {
+            // PFID_R5G6B5. Format 101 is the same 16-bit RGB used by
+            // character/prop textures (e.g. the shop NPCs); without it those
+            // surfaces resolve to no color and the mesh is dropped.
             let mut i = 0;
             while i + 1 < data.len() && n < max_pixels as u64 {
                 let v = u16::from_le_bytes([data[i], data[i + 1]]);
