@@ -626,13 +626,32 @@ impl Scene {
                     continue;
                 };
                 for s in &ce.statics {
-                    if s.id & 0xff000000 != 0x01000000 {
-                        continue;
+                    let tag = s.id & 0xff000000;
+                    if tag == 0x01000000 {
+                        // GfxObj static (fences, etc.): the model itself.
+                        let Some(buf) = portal.borrow_mut().read(s.id) else {
+                            continue;
+                        };
+                        raw.push((s.id, s.frame, buf));
+                    } else if tag == 0x02000000 {
+                        // SetupModel static: a shop's furniture (stairs,
+                        // candlestick, paintings, barrels) is a 1-part setup —
+                        // its single part is a GfxObj placed at the static's
+                        // frame. Multi-part setups are characters, not props.
+                        let Some(setup) = portal.borrow_mut().read(s.id) else {
+                            continue;
+                        };
+                        let Some(parts) = acegeom::parse_setup_parts(&setup) else {
+                            continue;
+                        };
+                        if parts.len() != 1 {
+                            continue;
+                        }
+                        let Some(buf) = portal.borrow_mut().read(parts[0]) else {
+                            continue;
+                        };
+                        raw.push((s.id, s.frame, buf));
                     }
-                    let Some(buf) = portal.borrow_mut().read(s.id) else {
-                        continue;
-                    };
-                    raw.push((s.id, s.frame, buf));
                 }
             }
         }
@@ -1072,6 +1091,22 @@ impl Scene {
                     continue;
                 }
                 out.push(Solid { tris, bbox, building: false });
+            }
+        }
+        // The env-cell statics (the shop's interior props — fences, stairs,
+        // candlesticks, paintings, barrels) also block movement. Reuse the
+        // rendered prop soup: each tri's first 9 floats are the world-space
+        // verts (the last 3 are the colour, dropped here).
+        for (_id, region, soup) in self.env_props(lb) {
+            if soup.is_empty() {
+                continue;
+            }
+            let mut tris = Vec::with_capacity(soup.len());
+            for i in (0..soup.len()).step_by(12) {
+                tris.extend_from_slice(&soup[i..i + 9]);
+            }
+            if !tris.is_empty() {
+                out.push(Solid { tris, bbox: region, building: false });
             }
         }
         self.env_solid_objs.insert(lb, out.clone());

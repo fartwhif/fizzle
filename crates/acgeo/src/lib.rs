@@ -451,8 +451,9 @@ mod tests {
     /// LBI has no stabs), in an unwrapped placement frame. The lifestone
     /// room of retail town 0x8502 (cell 0x850201ad, env 0x0d0001c9, region
     /// x 5..15, unwrapped y -35..-25): a player at the wrapped
-    /// (12.32, 163.52) must be blocked by the west wall (unwrapped x = 5),
-    /// may walk inside the room, and the renderer must show walls/ceiling.
+    /// (12.0, 160.0) — clear of the room's solid props (furniture, fences)
+    /// — must be blocked by the west wall (unwrapped x = 5), may walk
+    /// inside the room, and the renderer must show walls/ceiling.
     #[test]
     fn town_walls_render_and_collide() {
         let Some(dir) = dats::find_dat_dir(None) else {
@@ -468,7 +469,7 @@ mod tests {
         assert!(world.statics.is_empty());
         assert!(!world.env_statics.is_empty());
 
-        let (px, py) = (12.32f32, 163.52f32);
+        let (px, py) = (12.0f32, 160.0f32);
         let z0 = world.height_at(px, py).unwrap_or(0.0);
         // West toward the room's west wall (unwrapped x = 5): blocked.
         assert!(world.blocked(px, py, z0, 4.0, py, z0));
