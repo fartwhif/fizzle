@@ -745,21 +745,23 @@ impl Scene {
                         // Resolve the pose: a 1-part setup sits at the static
                         // frame with an identity pose; a staircase takes its
                         // row-0 part frames from its DefaultAnimation, each
-                        // composed with the static frame.
-                        let (pos_frame, part_frames) = if is_staircase {
-                            acegeom::parse_setup_tail(&setup)
-                                .and_then(|t| {
-                                    if t[0] == 0 {
-                                        None
-                                    } else {
-                                        portal
-                                            .borrow_mut()
-                                            .read(t[0])
-                                            .as_deref()
-                                            .and_then(acegeom::parse_animation)
-                                    }
-                                })
-                                .map(|a| {
+                        // composed with the static frame. has_anim is false
+                        // when no DefaultAnimation exists (the common case for
+                        // a static staircase) - then every part sits at the
+                        // static frame with an identity pose.
+                        let (pos_frame, part_frames, has_anim) = if is_staircase {
+                            match acegeom::parse_setup_tail(&setup).and_then(|t| {
+                                if t[0] == 0 {
+                                    None
+                                } else {
+                                    portal
+                                        .borrow_mut()
+                                        .read(t[0])
+                                        .as_deref()
+                                        .and_then(acegeom::parse_animation)
+                                }
+                            }) {
+                                Some(a) => {
                                     let pos = match &a.pos_frames {
                                         Some(pf) if pf.len() >= 7 => Frame::new(
                                             pf[0], pf[1], pf[2], pf[3], pf[4], pf[5], pf[6],
@@ -784,22 +786,48 @@ impl Scene {
                                             }
                                         })
                                         .collect();
-                                    (pos, pfs)
-                                })
-                                .unwrap_or((
+                                    (pos, pfs, true)
+                                }
+                                None => (
                                     IDENTITY,
                                     (0..parts.len()).map(|_| IDENTITY).collect(),
-                                ))
+                                    false,
+                                ),
+                            }
                         } else {
-                            (IDENTITY, vec![IDENTITY])
+                            (IDENTITY, vec![IDENTITY], false)
                         };
                         let n_parts = if is_staircase { parts.len() } else { 1 };
+                        // A no-animation staircase has its parts' raw geometry
+                        // centered on the setup origin, so the whole thing would
+                        // render centered on s.frame.oz (the base sinks below the
+                        // floor). Lift the frame so the base (min raw z) sits at
+                        // s.frame.oz, matching the 1-part step-box convention
+                        // where a flat box at z~0 sits exactly at s.frame.oz.
+                        let mut frame = s.frame;
+                        if is_staircase && !has_anim {
+                            let mut min_z = f32::INFINITY;
+                            for &part_id in parts.iter().take(n_parts) {
+                                if let Some(buf) = portal.borrow_mut().read(part_id) {
+                                    if let Some(mesh) =
+                                        acegeom::parse_gfx_obj(&buf, |_| None, None)
+                                    {
+                                        for i in (0..mesh.pos.len()).step_by(3) {
+                                            min_z = min_z.min(mesh.pos[i + 2]);
+                                        }
+                                    }
+                                }
+                            }
+                            if min_z.is_finite() && min_z < 0.0 {
+                                frame.oz -= min_z;
+                            }
+                        }
                         for (pi, &part_id) in parts.iter().enumerate().take(n_parts) {
                             let Some(buf) = portal.borrow_mut().read(part_id) else {
                                 continue;
                             };
                             let pf = part_frames.get(pi).copied().unwrap_or(IDENTITY);
-                            let (q, t) = acegeom::compose3(&s.frame, &pos_frame, &pf);
+                            let (q, t) = acegeom::compose3(&frame, &pos_frame, &pf);
                             let world =
                                 Frame::new(t[0], t[1], t[2], q[0], q[1], q[2], q[3]);
                             raw.push((s.id, world, buf));
