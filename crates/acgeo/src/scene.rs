@@ -100,6 +100,14 @@ pub struct Scene {
     /// duplicates the building's outer walls is already skipped, so the
     /// interior shows with no z-fight; from outside the env cells represent it.
     building_soups: HashMap<u32, Vec<(u32, Aabb, Vec<f32>)>>,
+    /// Near-flat, upward-facing floor planes derived from the building
+    /// GfxObj meshes per landblock: one `[ztop, xmin, ymin, xmax, ymax]`
+    /// per triangle. These are the shop's interior floors (e.g. the second
+    /// floor) that the terrain height grid has no record of; [`Scene::height_at`]
+    /// lifts the foot onto the highest one that contains it so the character
+    /// stands on an upper floor instead of falling through to the ground.
+    /// Cached.
+    building_floors: HashMap<u32, Vec<[f32; 5]>>,
     /// GfxObj (0x01) statics placed inside the env (indoor) cells per
     /// landblock — the shop's interior props (stairs, candlesticks,
     /// paintings). 12 floats/tri (3 world-space verts + rgb). The env-cell
@@ -158,6 +166,7 @@ impl Scene {
             env_soups: HashMap::new(),
             prop_soups: HashMap::new(),
             building_soups: HashMap::new(),
+            building_floors: HashMap::new(),
             env_prop_soups: HashMap::new(),
             env_solid_objs: HashMap::new(),
             setup_parts_cache: HashMap::new(),
@@ -371,6 +380,15 @@ impl Scene {
                 z = top;
             }
         }
+        // A shop's upper floor is a near-flat upward-facing plane in the
+        // building GfxObj mesh (the terrain grid only records the ground).
+        // Lift the foot onto it so the character stands on the second floor
+        // instead of falling through to the ground.
+        if let Some(top) = self.floor_top_at(lb, gx, gy, z) {
+            if (0.2..8.0).contains(&(top - z)) {
+                z = top;
+            }
+        }
         Some(z)
     }
 
@@ -420,6 +438,76 @@ impl Scene {
                             && gy <= ymax + dy
                         {
                             best = Some(best.map_or(zmax, |b: f32| b.max(zmax)));
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// The z of the highest upward-facing, near-flat *floor* plane of the
+    /// landblock's building GfxObj meshes that contains block-local
+    /// `(gx, gy)` and rises above `terrain_z` — an upper floor the
+    /// character can stand on. `None` when the foot is over no such floor.
+    /// The terrain grid only records the ground, so without this a shop's
+    /// second floor (a building-soup plane) drops the foot to the ground and
+    /// the character falls through it. The planes are precomputed once per
+    /// landblock ([`Scene::building_floors`]): each building-soup triangle
+    /// that is near-flat (own z-range < 0.3) and faces up (positive z
+    /// normal) is a floor candidate; vertical walls and ceilings never are.
+    fn floor_top_at(&mut self, lb: u32, gx: f32, gy: f32, terrain_z: f32) -> Option<f32> {
+        if !self.building_floors.contains_key(&lb) {
+            let mut floors: Vec<[f32; 5]> = Vec::new();
+            for (_id, _region, soup) in self.building_soup(lb) {
+                for o in (0..soup.len()).step_by(12) {
+                    let ax = soup[o];
+                    let ay = soup[o + 1];
+                    let az = soup[o + 2];
+                    let bx = soup[o + 3];
+                    let by = soup[o + 4];
+                    let bz = soup[o + 5];
+                    let cx = soup[o + 6];
+                    let cy = soup[o + 7];
+                    let cz = soup[o + 8];
+                    let zmin = az.min(bz).min(cz);
+                    let zmax = az.max(bz).max(cz);
+                    if zmax - zmin >= 0.3 {
+                        continue;
+                    }
+                    // Normal z-component of (B-A)x(C-A); >0 faces up.
+                    let nz = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+                    if nz <= 0.0 {
+                        continue;
+                    }
+                    floors.push([
+                        zmax,
+                        ax.min(bx).min(cx),
+                        ay.min(by).min(cy),
+                        ax.max(bx).max(cx),
+                        ay.max(by).max(cy),
+                    ]);
+                }
+            }
+            self.building_floors.insert(lb, floors);
+        }
+        let mut best: Option<f32> = None;
+        if let Some(floors) = self.building_floors.get(&lb) {
+            for f in floors {
+                let (ztop, xmin, ymin, xmax, ymax) = (f[0], f[1], f[2], f[3], f[4]);
+                if ztop <= terrain_z + 0.1 {
+                    continue;
+                }
+                // Test the floor and its copies across the block seam, like
+                // the periodic `ray_blocked`.
+                for dx in [0.0f32, BLOCK_LEN, -BLOCK_LEN] {
+                    for dy in [0.0f32, BLOCK_LEN, -BLOCK_LEN] {
+                        if xmin + dx <= gx
+                            && gx <= xmax + dx
+                            && ymin + dy <= gy
+                            && gy <= ymax + dy
+                        {
+                            best = Some(best.map_or(ztop, |b| b.max(ztop)));
                         }
                     }
                 }
