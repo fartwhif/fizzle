@@ -168,12 +168,27 @@ pub fn get_dereth_land(dat_dir: Option<&str>) -> Option<DerethLand> {
     dereth::get_dereth_land(dat_dir)
 }
 
+/// Landblock edge length (world units): the block frame is periodic in it.
+const BLOCK_LEN: f32 = 192.0;
+
+/// Translate a block-local coordinate from the frame of landblock `from`
+/// into the frame of landblock `to`: the origin-offset delta between the
+/// two (landblock = `block_x << 8 | block_y`, `BLOCK_LEN` per block).
+#[inline]
+fn block_frame_delta(from: u32, to: u32) -> (f32, f32) {
+    let dx = (((from >> 8) & 0xFF) as i32 - ((to >> 8) & 0xFF) as i32) as f32 * BLOCK_LEN;
+    let dy = ((from & 0xFF) as i32 - (to & 0xFF) as i32) as f32 * BLOCK_LEN;
+    (dx, dy)
+}
+
 /// The 3D world: owns the retail-DAT scene, the terrain/collision probe, the
 /// camera-zoom state, and per-actor animation clocks. All access is on the
 /// owning thread (the main loop). `available() == false` (no dats) → every
 /// probe query is "no info" and [`World3D::render`] returns `None`.
 pub struct World3D {
     scene: scene::Scene,
+    /// Door collision slabs, block-local to the current landblock
+    /// (re-based by `set_landblock` on a crossing).
     doors: std::collections::HashMap<u32, render::Door>,
     cur_lb: u32,
     statics: Vec<Solid>,
@@ -279,6 +294,19 @@ impl World3D {
         if lb == self.cur_lb {
             return;
         }
+        // The door slabs are stored in the old block frame; shift them into
+        // the new frame (the same delta the actors get on the crossing), so
+        // a door or sign in the player's old block stays where it is on
+        // screen instead of landing a block away.
+        let (dx, dy) = block_frame_delta(self.cur_lb, lb);
+        if dx != 0.0 || dy != 0.0 {
+            for d in self.doors.values_mut() {
+                d.aabb[0] += dx;
+                d.aabb[1] += dy;
+                d.aabb[3] += dx;
+                d.aabb[4] += dy;
+            }
+        }
         self.cur_lb = lb;
         self.statics = self.scene.solids_for_block(lb);
         self.env_statics = self.scene.env_statics(lb);
@@ -300,12 +328,21 @@ impl World3D {
         }
     }
 
-    /// Add/update a door collision slab (`None` aabb drops it). `open` sets
-    /// the swing's goal; any in-flight swing is preserved so the door eases
-    /// to the new state rather than snapping.
-    pub fn set_door(&mut self, guid: u32, aabb: Option<Aabb>, open: bool) {
+    /// Add/update a door collision slab (`None` aabb drops it). `aabb` is
+    /// block-local to the door's own landblock `block` (the server's entity
+    /// cell); it is stored in the current block frame — the frame the
+    /// renderer draws in — so a door or sign in a neighbor block stays put
+    /// when the player crosses. `open` sets the swing's goal; any in-flight
+    /// swing is preserved so the door eases to the new state rather than
+    /// snapping.
+    pub fn set_door(&mut self, guid: u32, aabb: Option<Aabb>, open: bool, block: u32) {
         match aabb {
-            Some(b) => {
+            Some(mut b) => {
+                let (dx, dy) = block_frame_delta(block, self.cur_lb);
+                b[0] += dx;
+                b[1] += dy;
+                b[3] += dx;
+                b[4] += dy;
                 let goal = if open { 1.0 } else { 0.0 };
                 let open_cur = self.doors.get(&guid).map(|d| d.open).unwrap_or(0.0);
                 self.doors.insert(

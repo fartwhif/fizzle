@@ -771,6 +771,7 @@ impl App {
                 if o.item_type == crate::world::ITEM_TYPE_DOOR {
                     if let Some(w) = self.world3d.as_mut() {
                         let model_aabb = o.setup_id.and_then(|s| w.setup_aabb(s));
+                        let block = position.map(|p| (p.0 >> 16) & 0xFFFF).unwrap_or(0);
                         let aabb = model_aabb.and_then(|m| {
                             position.map(|p| {
                                 let mut aabb = transform_aabb(
@@ -791,7 +792,7 @@ impl App {
                         });
                         let open = o.motion_cmd == crate::world::DOOR_MOTION_ON
                             || (o.physics_state & crate::world::PHYSICS_ETHEREAL) != 0;
-                        w.set_door(o.guid, aabb, open);
+                        w.set_door(o.guid, aabb, open, block);
                     }
                 }
                 // The player's own ObjectCreate carries the spawn position —
@@ -950,12 +951,12 @@ impl App {
                     };
                 }
                 if let Some(w) = self.world3d.as_mut() {
-                    let (setup, origin, rot) = self
+                    let (setup, origin, rot, block) = self
                         .world
                         .entities
                         .get(&m.guid)
-                        .map_or((None, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]), |e| {
-                            (e.setup_id, [e.pos.x, e.pos.y, e.pos.z], e.rot)
+                        .map_or((None, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], 0u32), |e| {
+                            (e.setup_id, [e.pos.x, e.pos.y, e.pos.z], e.rot, e.block())
                         });
                     let aabb = setup
                         .and_then(|s| w.setup_aabb(s))
@@ -968,7 +969,7 @@ impl App {
                             aabb[5] += dz;
                             aabb
                         });
-                    w.set_door(m.guid, aabb, open);
+                    w.set_door(m.guid, aabb, open, block);
                 }
             }
             Incoming::PlayerKilled { message, victim, killer } => {

@@ -105,7 +105,8 @@ const DOOR_OPEN_ANGLE: f32 = 105.0 * std::f32::consts::PI / 180.0;
 /// edge as `open` (0 = closed, 1 = fully open) eases toward `goal`.
 #[derive(Clone, Copy, Debug)]
 pub struct Door {
-    /// The closed-door slab in world space.
+    /// The closed-door slab, block-local to the current landblock (the
+    /// frame the renderer draws and line-of-sight tests in).
     pub aabb: Aabb,
     /// The current swing (0 = closed, 1 = fully open).
     pub open: f32,
@@ -1884,6 +1885,78 @@ mod tests {
             return None;
         }
         Some(Scene::new(None))
+    }
+
+    // Regression: a door-type entity's collision slab (doors and signs —
+    // their only reliable visual at 80×24) must render at its true screen
+    // position after the player crosses into a neighbor landblock, and the
+    // slab must survive `set_landblock`'s re-base. Before the fix the slab
+    // was registered in the door's own block frame but drawn unshifted in
+    // the camera's block frame: 192u off, so the Rithwic sign's top cell
+    // and the shop doors vanished on the C98C→C98D crossing.
+    #[test]
+    fn door_slab_survives_landblock_crossing() {
+        let Some(dir) = crate::dats::find_dat_dir(None) else {
+            eprintln!("skipped: retail dats unavailable");
+            return;
+        };
+        use crate::World3D;
+        let h = std::f32::consts::PI;
+        // The town-square camera, sitting on the C98C/C98D boundary and
+        // facing the Rithwic sign; both frames share one world camera
+        // point (C98C y 192.002 == C98D y 0.002).
+        let cam1b = Camera { x: 103.11, y: 192.002, z: 22.0, heading: h };
+        let cam2 = Camera { x: 103.11, y: 0.002, z: 22.0, heading: h };
+        let (cols, rows) = (80usize, 24usize);
+        // The Rithwic sign's slab (a door-type entity): the setup box at
+        // C98C (102.446, 186.736, 22.005) rotated by the sign's yaw and
+        // grounded — the same construction the app applies on ObjectCreate.
+        let slab = [102.179054f32, 186.43785, 22.005, 102.79292, 187.0322, 23.134998];
+
+        // The slab registers before the first `set_landblock` (the login
+        // ObjectCreate arrives while `cur_lb` is still 0) — the app's order.
+        let mut base = World3D::new(Some(&dir));
+        let mut door = World3D::new(Some(&dir));
+        door.set_door(1, Some(slab), false, 0xC98C);
+
+        let cells = |w: &mut World3D, cam: &Camera, lb: u32| -> Vec<[u8; 3]> {
+            w.set_landblock(lb);
+            w.render(lb, cam, &[], cols, rows, false, None, false, None)
+                .expect("frame")
+                .cells
+        };
+        let diff = |a: &[[u8; 3]], b: &[[u8; 3]]| -> Vec<(usize, [u8; 3])> {
+            a.iter()
+                .zip(b)
+                .enumerate()
+                .filter(|(_, (x, y))| x != y)
+                .map(|(i, (_, c))| (i, *c))
+                .collect()
+        };
+
+        // Near frame (C98C centered): the slab paints the sign's 2-cell
+        // footprint, including the top cell (row 9).
+        let near = diff(&cells(&mut base, &cam1b, 0xC98C), &cells(&mut door, &cam1b, 0xC98C));
+        assert!(near.len() >= 2, "slab must paint its footprint in the near frame: {near:?}");
+        assert!(
+            near.iter().any(|(i, _)| *i == 9 * cols + 40),
+            "the sign's top cell must paint in the near frame: {near:?}"
+        );
+
+        // Far frame (C98D centered, after the crossing): the slab is at the
+        // same world position under the same camera, so it must paint the
+        // same screen cells (colors within ±1 channel for the fog rounding
+        // of the rebased coordinates).
+        let far = diff(&cells(&mut base, &cam2, 0xC98D), &cells(&mut door, &cam2, 0xC98D));
+        let same = near.len() == far.len()
+            && near
+                .iter()
+                .zip(&far)
+                .all(|((i1, c1), (i2, c2))| i1 == i2 && c1.iter().zip(c2).all(|(x, y)| (*x as i32 - *y as i32).abs() <= 1));
+        assert!(
+            same,
+            "the slab's screen footprint must not change on the crossing: near {near:?} vs far {far:?}"
+        );
     }
 
     // Regression (ground disappearing at a landblock edge): the renderer must
