@@ -134,14 +134,6 @@ pub struct DerethLand {
     pub land: Vec<u8>,
 }
 
-/// Wrap a client-frame coordinate into the `[0, 192)` block frame.
-#[must_use]
-pub fn wrap_block_coord(v: f32) -> f32 {
-    const BLOCK_LEN: f32 = 192.0;
-    let m = v % BLOCK_LEN;
-    if m < 0.0 { m + BLOCK_LEN } else { m }
-}
-
 /// True when block-local `(x, y)` is inside `aabb`'s horizontal extent
 /// (± `margin`). The AABB may sit in an unwrapped world frame (an env
 /// cell's placement frame can put its structure at a negative offset), so
@@ -189,11 +181,11 @@ pub struct World3D {
     /// landblock — a town's walls (its LBI has no stabs). Collision-only
     /// (the renderer draws the env soup); re-based on a landblock change.
     env_statics: Vec<Solid>,
-    /// The env (indoor/structure) cell triangle soups for the current
-    /// landblock, one per cell: `(cell_id, drawn-vertex region, soup)` (the
-    /// walls/ceiling the renderer draws). The renderer skips the cell the
-    /// camera is inside. Re-based on a landblock change.
-    env_soup: Vec<(u32, Aabb, Vec<f32>)>,
+    /// The 3×3 landblock geometry grid centered on the current block
+    /// (index 4 = current). Fetched in `set_landblock`, drawn in `render`:
+    /// buildings/props in a neighbor block stay visible until the fog takes
+    /// them instead of popping out when the player crosses a boundary.
+    neighbors: render::Neighborhood,
     zoom: render::Zoom,
     anim: std::collections::HashMap<u32, render::AnimClock>,
     /// Whether the last rendered frame used the first-person (head) camera —
@@ -213,7 +205,7 @@ impl World3D {
             cur_lb: 0,
             statics: Vec::new(),
             env_statics: Vec::new(),
-            env_soup: Vec::new(),
+            neighbors: std::array::from_fn(|_| render::BlockGeom::default()),
             zoom: render::Zoom::new(),
             anim: std::collections::HashMap::new(),
             last_first_person: false,
@@ -290,7 +282,22 @@ impl World3D {
         self.cur_lb = lb;
         self.statics = self.scene.solids_for_block(lb);
         self.env_statics = self.scene.env_statics(lb);
-        self.env_soup = self.scene.env_soup(lb);
+        // Fetch the 3×3 geometry grid around the player's block (cheap when
+        // the blocks are already scene-cached: one LRU lookup each).
+        let bx = ((lb >> 8) & 0xFF) as i32;
+        let by = (lb & 0xFF) as i32;
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                let nbl = render::landblock_at(bx + dx, by + dy);
+                self.neighbors[((dy + 1) * 3 + (dx + 1)) as usize] = render::BlockGeom {
+                    statics: self.scene.solids_for_block(nbl),
+                    env: self.scene.env_soup(nbl),
+                    props: self.scene.prop_soup(nbl),
+                    buildings: self.scene.building_soup(nbl),
+                    env_props: self.scene.env_props(nbl),
+                };
+            }
+        }
     }
 
     /// Add/update a door collision slab (`None` aabb drops it). `open` sets
@@ -353,9 +360,8 @@ impl World3D {
             &mut self.scene,
             &mut self.zoom,
             &mut self.anim,
-            &self.statics,
             &self.env_statics,
-            &self.env_soup,
+            &self.neighbors,
             &mut self.doors,
             lb,
             cam,

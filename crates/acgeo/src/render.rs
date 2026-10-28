@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::acegeom::{self, ACTOR_GROUND_LIFT, Animation, AnimRef, Frame, MotionTable, IDENTITY};
 use crate::scene::{mat_color, NULL_PART, Scene};
-use crate::{region_contains_xy, wrap_block_coord, Aabb, Actor, Camera, Frame3D, ReticleTarget, Solid};
+use crate::{region_contains_xy, Aabb, Actor, Camera, Frame3D, ReticleTarget, Solid};
 
 // ---------------------------------------------------------------------------
 // camera / light / fog framing (the TS's tunable constants)
@@ -31,7 +31,14 @@ const LIGHT_DIFFUSE: f32 = 0.8;
 /// Linear distance fog (blends geometry toward the sky).
 const FOG_START: f32 = 30.0;
 const FOG_END: f32 = 165.0;
-const FOG_COLOR: (f32, f32, f32) = (120.0, 168.0, 214.0);
+
+/// The sky gradient color at screen row `r`, unclamped. Shared by the sky
+/// fill and the distance-fog target so fully-fogged geometry blends
+/// seamlessly into the sky at the horizon (no visible terrain grid rim).
+fn sky_color(r: f32, rows: usize) -> (f32, f32, f32) {
+    let t = (r / (rows - 1) as f32).clamp(0.0, 1.0);
+    (52.0 + t * 66.0, 84.0 + t * 84.0, 150.0 + t * 74.0)
+}
 
 /// Landblock edge length (world units): the block frame is periodic in it.
 const BLOCK_LEN: f32 = 192.0;
@@ -189,7 +196,6 @@ pub struct AnimClock {
     /// Last frame's `now` (seconds); negative = never rendered.
     pub last_now: f64,
 }
-
 impl Default for AnimClock {
     fn default() -> Self {
         Self {
@@ -199,6 +205,32 @@ impl Default for AnimClock {
         }
     }
 }
+
+/// The renderable geometry of one landblock, in that block's block-local
+/// frame (x/y in `[0, 192)`, with unwrapped placement frames for env cells
+/// and GfxObj meshes near a block edge). The rasterizer shifts each block
+/// into the periodic 192u frame around the player's block via the block's
+/// `(dx, dy)` offset, so buildings and props in a neighbor landblock stay
+/// visible until the fog takes them — instead of popping out the moment the
+/// player crosses into the neighboring block.
+#[derive(Clone, Debug, Default)]
+pub struct BlockGeom {
+    /// Static solids (physics triangles — the flat building boxes).
+    pub statics: Vec<Solid>,
+    /// Env (indoor/structure) cell soups — the walls/ceiling/floor shells,
+    /// one entry per cell: `(cell_id, region, soup)`.
+    pub env: Vec<(u32, Aabb, Vec<f32>)>,
+    /// Placed GfxObj props (furniture / barrels / lamps / fences).
+    pub props: Vec<(u32, Aabb, Vec<f32>)>,
+    /// Building GfxObj meshes (the detailed multi-material town models).
+    pub buildings: Vec<(u32, Aabb, Vec<f32>)>,
+    /// GfxObj statics placed inside the env cells (the shop's interior props).
+    pub env_props: Vec<(u32, Aabb, Vec<f32>)>,
+}
+
+/// The 3×3 landblock grid of [`BlockGeom`] around the player's block,
+/// indexed `(dy + 1) * 3 + (dx + 1)` (center block = index 4).
+pub type Neighborhood = [BlockGeom; 9];
 
 pub(crate) fn now_secs() -> f64 {
     SystemTime::now()
@@ -312,7 +344,7 @@ fn camera_basis_first_person(cam: &Camera, cols: usize, rows: usize) -> Basis {
 /// into `0..256` (the landblock is a 256×256 grid: high byte = x, low byte =
 /// y). Used to address the 3×3 neighbor terrain grid around the current block.
 #[inline]
-fn landblock_at(bx: i32, by: i32) -> u32 {
+pub(crate) fn landblock_at(bx: i32, by: i32) -> u32 {
     ((bx.rem_euclid(256)) as u32) << 8 | (by.rem_euclid(256)) as u32
 }
 
@@ -605,8 +637,8 @@ fn cl8(v: f32) -> u8 {
     (v.min(255.0).max(0.0)) as u8
 }
 
-/// One directed triangle into the frame (backface cull, flat Lambert,
-/// distance fog, z-buffer).
+/// One directed triangle into the frame (backface cull, near-plane clip,
+/// flat Lambert, distance fog, z-buffer).
 fn raster_tri(
     cells: &mut [[u8; 3]],
     depth: &mut [f32],
@@ -633,22 +665,16 @@ fn raster_tri(
     if nx * (b.cam[0] - ax) + ny * (b.cam[1] - ay) + nz * (b.cam[2] - az) <= 0.0 {
         return;
     }
-    let Some(pa) = project(b, ax, ay, az) else {
-        return;
-    };
-    let Some(pb) = project(b, bx, by, bz) else {
-        return;
-    };
-    let Some(pc) = project(b, cx, cy, cz) else {
-        return;
-    };
     // Flat Lambert from the (normalized) face normal.
     let nl = (nx * nx + ny * ny + nz * nz).sqrt();
     let lambert = if nl < f32::EPSILON { 0.0 } else {
         (nx * light.0 + ny * light.1 + nz * light.2) / nl
     };
     let shade = LIGHT_AMBIENT + LIGHT_DIFFUSE * lambert.max(0.0);
-    // Linear distance fog from the camera to the centroid.
+    // Linear distance fog from the camera to the centroid, toward the sky
+    // color at the centroid's screen row (so fully-fogged geometry at the
+    // horizon is seamless against the sky and the terrain grid rim never
+    // shows).
     let (dx, dy, dz) = (
         (ax + bx + cx) / 3.0 - b.cam[0],
         (ay + by + cy) / 3.0 - b.cam[1],
@@ -660,57 +686,110 @@ fn raster_tri(
     } else if ft > 1.0 {
         ft = 1.0;
     }
+    let fwd = dx * b.f[0] + dy * b.f[1] + dz * b.f[2];
+    let row = if fwd > 0.0 {
+        b.sc[1] - (dx * b.u[0] + dy * b.u[1] + dz * b.u[2]) * b.focal / fwd
+    } else {
+        0.0
+    };
+    let fog = sky_color(row, rows);
     let color = (
-        color.0 * shade + (FOG_COLOR.0 - color.0 * shade) * ft,
-        color.1 * shade + (FOG_COLOR.1 - color.1 * shade) * ft,
-        color.2 * shade + (FOG_COLOR.2 - color.2 * shade) * ft,
+        color.0 * shade + (fog.0 - color.0 * shade) * ft,
+        color.1 * shade + (fog.1 - color.1 * shade) * ft,
+        color.2 * shade + (fog.2 - color.2 * shade) * ft,
     );
     let color: [u8; 3] = [cl8(color.0), cl8(color.1), cl8(color.2)];
 
-    // Raster: barycentric point-in-triangle over the screen bbox.
-    let min_x = (pa.0.min(pb.0.min(pc.0)).floor() as i32).max(0) as usize;
-    let max_x = (pa.0.max(pb.0.max(pc.0)).ceil() as i32).clamp(0, cols as i32 - 1) as usize;
-    let min_y = (pa.1.min(pb.1.min(pc.1)).floor() as i32).max(0) as usize;
-    let max_y = (pa.1.max(pb.1.max(pc.1)).ceil() as i32).clamp(0, rows as i32 - 1) as usize;
-    if max_x < min_x || max_y < min_y {
+    // Camera-frame coordinates (right, up, forward depth) for the vertices.
+    let cam_pt = |p: (f32, f32, f32)| {
+        let (vx, vy, vz) = (p.0 - b.cam[0], p.1 - b.cam[1], p.2 - b.cam[2]);
+        (
+            vx * b.r[0] + vy * b.r[1] + vz * b.r[2],
+            vx * b.u[0] + vy * b.u[1] + vz * b.u[2],
+            vx * b.f[0] + vy * b.f[1] + vz * b.f[2],
+        )
+    };
+    let vs = [cam_pt(a), cam_pt(bb), cam_pt(c)];
+    // Clip against the near plane (zc >= CAM_NEAR): a vertex behind the
+    // camera must not drop the whole triangle — a 24u terrain quad under a
+    // close (zoomed-in) camera straddles the plane, and dropping the quad
+    // holes the ground in front of the player. Keep the in-front part (3 or
+    // 4 points, original winding).
+    let mut pts: [(f32, f32, f32); 4] = [(0.0, 0.0, 0.0); 4];
+    let mut n = 0;
+    for i in 0..3 {
+        let v = vs[i];
+        let w = vs[(i + 1) % 3];
+        let vi = v.2 >= CAM_NEAR;
+        let wi = w.2 >= CAM_NEAR;
+        if vi {
+            pts[n] = v;
+            n += 1;
+        }
+        if vi != wi {
+            let t = (CAM_NEAR - v.2) / (w.2 - v.2);
+            pts[n] = (v.0 + (w.0 - v.0) * t, v.1 + (w.1 - v.1) * t, CAM_NEAR);
+            n += 1;
+        }
+    }
+    if n < 3 {
         return;
     }
-    let e = |p1: (f32, f32), p2: (f32, f32), p: (f32, f32)| {
-        (p2.0 - p1.0) * (p.1 - p1.1) - (p2.1 - p1.1) * (p.0 - p1.0)
-    };
-    let (p0, p1, p2) = (
-        (pa.0, pa.1),
-        (pb.0, pb.1),
-        (pc.0, pc.1),
+    // Project the clipped points to screen cells.
+    let proj = |p: &(f32, f32, f32)| (
+        b.sc[0] + p.0 * b.focal / p.2,
+        b.sc[1] - p.1 * b.focal / p.2,
+        p.2,
     );
-    let denom = e(p0, p1, p2);
-    if denom.abs() < 1e-6 {
-        return; // degenerate on screen
-    }
-    for r in min_y..=max_y {
-        let py = r as f32 + 0.5;
-        let row_base = r * cols;
-        for cc in min_x..=max_x {
-            let px = cc as f32 + 0.5;
-            let la = e(p1, p2, (px, py)) / denom;
-            if la < 0.0 || la > 1.0 {
-                continue;
-            }
-            let lb = e(p2, p0, (px, py)) / denom;
-            if lb < 0.0 || lb > 1.0 {
-                continue;
-            }
-            let lc = 1.0 - la - lb;
-            if lc < 0.0 || lc > 1.0 {
-                continue;
-            }
-            let zc = la * pa.2 + lb * pb.2 + lc * pc.2;
-            let idx = row_base + cc;
-            if zc < depth[idx] {
-                depth[idx] = zc;
-                cells[idx] = color;
+    let (p0, p1, p2) = (proj(&pts[0]), proj(&pts[1]), proj(&pts[2]));
+    let p3 = if n == 4 { Some(proj(&pts[3])) } else { None };
+
+    // Raster: barycentric point-in-triangle over the screen bbox.
+    let mut raster3 = |p0: (f32, f32, f32), p1: (f32, f32, f32), p2: (f32, f32, f32)| {
+        let min_x = (p0.0.min(p1.0.min(p2.0)).floor() as i32).max(0) as usize;
+        let max_x = (p0.0.max(p1.0.max(p2.0)).ceil() as i32).clamp(0, cols as i32 - 1) as usize;
+        let min_y = (p0.1.min(p1.1.min(p2.1)).floor() as i32).max(0) as usize;
+        let max_y = (p0.1.max(p1.1.max(p2.1)).ceil() as i32).clamp(0, rows as i32 - 1) as usize;
+        if max_x < min_x || max_y < min_y {
+            return;
+        }
+        let e = |p1: (f32, f32), p2: (f32, f32), p: (f32, f32)| {
+            (p2.0 - p1.0) * (p.1 - p1.1) - (p2.1 - p1.1) * (p.0 - p1.0)
+        };
+        let (q0, q1, q2) = ((p0.0, p0.1), (p1.0, p1.1), (p2.0, p2.1));
+        let denom = e(q0, q1, q2);
+        if denom.abs() < 1e-6 {
+            return; // degenerate on screen
+        }
+        for r in min_y..=max_y {
+            let py = r as f32 + 0.5;
+            let row_base = r * cols;
+            for cc in min_x..=max_x {
+                let px = cc as f32 + 0.5;
+                let la = e(q1, q2, (px, py)) / denom;
+                if la < 0.0 || la > 1.0 {
+                    continue;
+                }
+                let lb = e(q2, q0, (px, py)) / denom;
+                if lb < 0.0 || lb > 1.0 {
+                    continue;
+                }
+                let lc = 1.0 - la - lb;
+                if lc < 0.0 || lc > 1.0 {
+                    continue;
+                }
+                let zc = la * p0.2 + lb * p1.2 + lc * p2.2;
+                let idx = row_base + cc;
+                if zc < depth[idx] {
+                    depth[idx] = zc;
+                    cells[idx] = color;
+                }
             }
         }
+    };
+    raster3(p0, p1, p2);
+    if let Some(p3) = p3 {
+        raster3(p0, p2, p3);
     }
 }
 
@@ -750,10 +829,18 @@ fn raster_soup(
 }
 
 /// Rasterize the static solids (physics triangles — no material, so a flat
-/// building color; both windings so backface culling keeps the visible side).
-/// A building solid the camera is inside is skipped: its detailed visual mesh
-/// (the building soup) is drawn in its place, and the flat box would z-fight
-/// it. From outside, the flat box is the building's only representation.
+/// building color; both windings so backface culling keeps the visible
+/// side). The block-local solids are shifted into the periodic 192u frame
+/// by `(ox, oy)` (a neighbor landblock's offset; `(0, 0)` for the current
+/// block). NO toroidal wrap: a solid's true position is its placement in
+/// its own block (the world is not 192u-periodic — the env-cell rooms are
+/// the one toroidal data artifact, and they keep their per-triangle wrap).
+/// Wrapping these to the camera-near copy drew a phantom image 192u across
+/// and made neighbor-block solids vanish exactly at the landblock
+/// transition. A building solid the camera is inside is skipped: its
+/// detailed visual mesh (the building soup) is drawn in its place, and the
+/// flat box would z-fight it. From outside, the flat box is the building's
+/// only representation.
 fn raster_statics(
     cells: &mut [[u8; 3]],
     depth: &mut [f32],
@@ -764,11 +851,13 @@ fn raster_statics(
     cam: &Camera,
     light: (f32, f32, f32),
     fog_span: f32,
+    ox: f32,
+    oy: f32,
 ) {
     for s in statics {
         if s.building
-            && cam.x >= s.bbox[0] && cam.x <= s.bbox[3]
-            && cam.y >= s.bbox[1] && cam.y <= s.bbox[4]
+            && cam.x >= s.bbox[0] + ox && cam.x <= s.bbox[3] + ox
+            && cam.y >= s.bbox[1] + oy && cam.y <= s.bbox[4] + oy
             && cam.z >= s.bbox[2] && cam.z <= s.bbox[5]
         {
             continue;
@@ -776,66 +865,97 @@ fn raster_statics(
         let tris = &s.tris;
         let n = tris.len() / 9 * 9;
         for i in (0..n).step_by(9) {
-            let a = (tris[i], tris[i + 1], tris[i + 2]);
-            let bb = (tris[i + 3], tris[i + 4], tris[i + 5]);
-            let c = (tris[i + 6], tris[i + 7], tris[i + 8]);
+            let a = (tris[i] + ox, tris[i + 1] + oy, tris[i + 2]);
+            let bb = (tris[i + 3] + ox, tris[i + 4] + oy, tris[i + 5]);
+            let c = (tris[i + 6] + ox, tris[i + 7] + oy, tris[i + 8]);
             raster_tri(cells, depth, b, cols, rows, a, bb, c, STATIC_COLOR, light, fog_span);
             raster_tri(cells, depth, b, cols, rows, bb, a, c, STATIC_COLOR, light, fog_span);
         }
     }
 }
 
-/// Rasterize the env-cell soups, whose triangles sit in an unwrapped
-/// placement frame (a town's room wraps the block toroidally, far outside
-/// the `[0, 192)` frame the camera uses): each triangle is first shifted by
-/// the periodic copy nearest the camera, then drawn in both windings so a
-/// wall is visible from either side. The cell whose region contains the
-/// camera (`cam_cell`) is skipped: its shell would otherwise wall in the
-/// interior (the double-sided walls + ceiling block the view of the room).
-fn raster_env_soup(
+/// Rasterize one env-cell soup, whose triangles sit in the cell's block's
+/// unwrapped placement frame (a town's room wraps the block toroidally, far
+/// outside the `[0, 192)` frame the camera uses). Each triangle is shifted
+/// by the periodic copy nearest the reference point `(rx, ry)` (in the
+/// soup's own frame — the current block passes the camera, a neighbor block
+/// passes its own center `(96, 96)` so the copy drawn is the one inside
+/// that block, not the toroidal image 192u across the current one), then
+/// offset into the periodic frame by `(ox, oy)`, then drawn in both
+/// windings so a wall is visible from either side.
+fn raster_env_cell(
     cells: &mut [[u8; 3]],
     depth: &mut [f32],
     b: &Basis,
     cols: usize,
     rows: usize,
-    soups: &[(u32, Aabb, Vec<f32>)],
-    cam_cell: Option<u32>,
+    soup: &[f32],
     light: (f32, f32, f32),
     fog_span: f32,
+    ox: f32,
+    oy: f32,
+    rx: f32,
+    ry: f32,
 ) {
-    for (cell_id, _region, soup) in soups {
-        if Some(*cell_id) == cam_cell {
-            continue;
-        }
-        let n = soup.len() / 12 * 12;
-        for t in (0..n).step_by(12) {
-            let (cr, cg, cb) = (soup[t + 9], soup[t + 10], soup[t + 11]);
-            let (sx, sy) = env_copy_shift(
-                (soup[t] + soup[t + 3] + soup[t + 6]) / 3.0,
-                (soup[t + 1] + soup[t + 4] + soup[t + 7]) / 3.0,
-                b.cam[0],
-                b.cam[1],
-            );
-            let a = (soup[t] + sx, soup[t + 1] + sy, soup[t + 2]);
-            let bb = (soup[t + 3] + sx, soup[t + 4] + sy, soup[t + 5]);
-            let c = (soup[t + 6] + sx, soup[t + 7] + sy, soup[t + 8]);
-            raster_tri(cells, depth, b, cols, rows, a, bb, c, (cr, cg, cb), light, fog_span);
-            raster_tri(cells, depth, b, cols, rows, bb, a, c, (cr, cg, cb), light, fog_span);
-        }
+    let n = soup.len() / 12 * 12;
+    for t in (0..n).step_by(12) {
+        let (cr, cg, cb) = (soup[t + 9], soup[t + 10], soup[t + 11]);
+        let (sx, sy) = env_copy_shift(
+            (soup[t] + soup[t + 3] + soup[t + 6]) / 3.0,
+            (soup[t + 1] + soup[t + 4] + soup[t + 7]) / 3.0,
+            rx,
+            ry,
+        );
+        let a = (soup[t] + sx + ox, soup[t + 1] + sy + oy, soup[t + 2]);
+        let bb = (soup[t + 3] + sx + ox, soup[t + 4] + sy + oy, soup[t + 5]);
+        let c = (soup[t + 6] + sx + ox, soup[t + 7] + sy + oy, soup[t + 8]);
+        raster_tri(cells, depth, b, cols, rows, a, bb, c, (cr, cg, cb), light, fog_span);
+        raster_tri(cells, depth, b, cols, rows, bb, a, c, (cr, cg, cb), light, fog_span);
     }
 }
 
-/// The env cell (by id) whose drawn-vertex region contains the player, or
-/// `None` when the player is outside every cell. The renderer skips that
-/// cell's shell so a building doesn't wall in its own interior. The x/y test
-/// runs on the 192-unit ring (a cell can sit in an unwrapped frame); the z
-/// test is a plain range (no vertical wrap).
+/// Rasterize one GfxObj mesh soup (12 floats/tri: 3 verts + rgb) — a placed
+/// prop / building mesh in its block's frame, offset into the periodic 192u
+/// frame by `(ox, oy)`. NO toroidal wrap (see [`raster_statics`]): a
+/// neighbor-block prop's true position is across the block edge, and
+/// wrapping it to the camera-near periodic copy made it vanish exactly at
+/// the landblock transition. Both windings, so the visible side is kept
+/// whatever the mesh's authored winding is (unlike the directed
+/// terrain/actor triangles).
+fn raster_gfx_mesh(
+    cells: &mut [[u8; 3]],
+    depth: &mut [f32],
+    b: &Basis,
+    cols: usize,
+    rows: usize,
+    soup: &[f32],
+    light: (f32, f32, f32),
+    fog_span: f32,
+    ox: f32,
+    oy: f32,
+) {
+    let n = soup.len() / 12 * 12;
+    for t in (0..n).step_by(12) {
+        let (cr, cg, cb) = (soup[t + 9], soup[t + 10], soup[t + 11]);
+        let a = (soup[t] + ox, soup[t + 1] + oy, soup[t + 2]);
+        let bb = (soup[t + 3] + ox, soup[t + 4] + oy, soup[t + 5]);
+        let c = (soup[t + 6] + ox, soup[t + 7] + oy, soup[t + 8]);
+        raster_tri(cells, depth, b, cols, rows, a, bb, c, (cr, cg, cb), light, fog_span);
+        raster_tri(cells, depth, b, cols, rows, bb, a, c, (cr, cg, cb), light, fog_span);
+    }
+}
+
+/// The env cell (by id) whose drawn-vertex region contains the point
+/// `(px, py)` expressed in that cell's block's frame (the camera minus the
+/// block's periodic offset), or `None` when the point is outside every
+/// cell. The renderer skips that cell's shell so a building doesn't wall in
+/// its own interior. The x/y test runs on the 192-unit ring (a cell can sit
+/// in an unwrapped frame); the z test is a plain range (no vertical wrap).
 #[must_use]
-fn env_cell_at(soups: &[(u32, Aabb, Vec<f32>)], cam: &Camera) -> Option<u32> {
-    soups.iter()
-        .find(|(_, r, _)| {
-            region_contains_xy(r, cam.x, cam.y, 0.0) && cam.z >= r[2] && cam.z <= r[5]
-        })
+fn env_cell_at_xy(soups: &[(u32, Aabb, Vec<f32>)], px: f32, py: f32, z: f32) -> Option<u32> {
+    soups
+        .iter()
+        .find(|(_, r, _)| region_contains_xy(r, px, py, 0.0) && z >= r[2] && z <= r[5])
         .map(|(c, _, _)| *c)
 }
 
@@ -1048,7 +1168,9 @@ fn draw_glow(
         let Some(glow_rgb) = a.glow else {
             continue;
         };
-        let (wx, wy, wz) = (wrap_block_coord(a.x), wrap_block_coord(a.y), a.z + GLOW_ANCHOR_H);
+        // The actor is already in the current block's frame (the caller
+        // shifts neighbor-block entities in); no periodic wrap.
+        let (wx, wy, wz) = (a.x, a.y, a.z + GLOW_ANCHOR_H);
         let Some((sx, sy, zc)) = project(b, wx, wy, wz) else {
             continue;
         };
@@ -1412,10 +1534,13 @@ fn build_dynamic_soup(
             None => resolve_pose(scene, a, clock.anim_time),
         };
 
-        // Actor's world frame (x/y wrapped into the current landblock's frame)
+        // Actor's world frame: the caller passes actors in the current
+        // block's frame (neighbor-block entities already shifted in), so no
+        // periodic wrap — wrapping a just-crossed actor 192u to the far side
+        // made it vanish exactly at the landblock transition.
         let obj = Frame::new(
-            wrap_block_coord(a.x),
-            wrap_block_coord(a.y),
+            a.x,
+            a.y,
             a.z,
             a.quat[0],
             a.quat[1],
@@ -1486,7 +1611,8 @@ fn build_dynamic_soup(
 // the frame
 // ---------------------------------------------------------------------------
 
-/// Render the landblock the camera is in into a `cols × rows` RGB frame.
+/// Render the 3×3 landblock neighborhood around `lb` (the player's block —
+/// the center, index 4, of `neighborhood`) into a `cols × rows` RGB frame.
 /// `None` when there is nothing to draw (no dats, no terrain and no actors,
 /// or too small).
 ///
@@ -1495,13 +1621,12 @@ fn build_dynamic_soup(
 /// camera position (entering a confined space zooms in) and eased back out
 /// when the sight opens (exiting zooms out).
 #[must_use]
-pub fn render_frame(
+pub(crate) fn render_frame(
     scene: &mut Scene,
     zoom: &mut Zoom,
     anim: &mut HashMap<u32, AnimClock>,
-    statics: &[Solid],
     env_statics: &[Solid],
-    env_soup: &[(u32, Aabb, Vec<f32>)],
+    neighborhood: &Neighborhood,
     doors: &mut HashMap<u32, Door>,
     lb: u32,
     cam: &Camera,
@@ -1534,9 +1659,16 @@ pub fn render_frame(
     // Camera mode is decided before the actor soup is built so the self body
     // can be hidden in first-person. The occlusion pass reports whether a
     // surface forced the camera closer than a usable third-person distance
-    // (a cramped room): then drop to the head camera.
-    let (target, blocked) =
-        occlude_camera_back(scene.block_soup(lb), statics, env_statics, cam, zoom.user_back);
+    // (a cramped room): then drop to the head camera. The occlusion ray runs
+    // at most `user_back` behind the player, so the current block's geometry
+    // (the neighborhood's center) is what it tests.
+    let (target, blocked) = occlude_camera_back(
+        scene.block_soup(lb),
+        &neighborhood[4].statics,
+        env_statics,
+        cam,
+        zoom.user_back,
+    );
     let first_person = blocked && target < THIRD_PERSON_MIN;
     let back = smooth_camera_zoom(zoom, target, now);
     let basis = if first_person {
@@ -1553,14 +1685,25 @@ pub fn render_frame(
     };
     let draw_actors: &[Actor] = if first_person { &fp_actors } else { actors };
     let dyn_soup = build_dynamic_soup(scene, draw_actors, anim, doors, now);
-    let prop_soup = scene.prop_soup(lb);
-    let building_soup = scene.building_soup(lb);
-    // The GfxObj statics placed inside the env cells — the shop's interior
-    // props (stairs, candlesticks, paintings). Drawn last of the geometry so
-    // they sit on top of the room's walls/floor.
-    let env_props = scene.env_props(lb);
-    let block_soup = scene.block_soup(lb);
-    if block_soup.map_or(true, |s| s.is_empty()) && dyn_soup.as_ref().map_or(true, |s| s.is_empty()) && env_soup.is_empty() && prop_soup.is_empty() && building_soup.is_empty() && env_props.is_empty() {
+    // The periodic-frame offset of grid cell `i` (dx*192, dy*192).
+    let off = |i: usize| {
+        (((i % 3) as i32 - 1) as f32 * BLOCK_LEN, ((i / 3) as i32 - 1) as f32 * BLOCK_LEN)
+    };
+    // Nothing to draw? Terrain in any grid cell, geometry in any neighbor
+    // block, or an actor soup.
+    let any_terrain = (0..9).any(|i| {
+        scene
+            .block_soup(landblock_at(bx + (i % 3) as i32 - 1, by + (i / 3) as i32 - 1))
+            .is_some_and(|s| !s.is_empty())
+    });
+    let any_geom = neighborhood.iter().any(|g| {
+        !g.statics.is_empty()
+            || !g.env.is_empty()
+            || !g.props.is_empty()
+            || !g.buildings.is_empty()
+            || !g.env_props.is_empty()
+    });
+    if !any_terrain && !any_geom && dyn_soup.as_ref().map_or(true, |s| s.is_empty()) {
         return None;
     }
 
@@ -1568,12 +1711,8 @@ pub fn render_frame(
     let total = cols * rows;
     let mut cells = vec![[0u8, 0, 0]; total];
     for (r, row) in cells.chunks_exact_mut(cols).enumerate() {
-        let t = r as f32 / (rows - 1) as f32;
-        let (sr, sg, sb) = (
-            cl8(52.0 + t * 66.0),
-            cl8(84.0 + t * 84.0),
-            cl8(150.0 + t * 74.0),
-        );
+        let (sr, sg, sb) = sky_color(r as f32, rows);
+        let (sr, sg, sb) = (cl8(sr), cl8(sg), cl8(sb));
         for c in row {
             *c = [sr, sg, sb];
         }
@@ -1595,109 +1734,112 @@ pub fn render_frame(
         for dx in -1i32..=1 {
             let nbl = landblock_at(bx + dx, by + dy);
             if let Some(soup) = scene.block_soup(nbl) {
-                if !soup.is_empty() {
-                    raster_soup(&mut cells, &mut depth, &basis, cols, rows, soup, light, fog_span, dx as f32 * BLOCK_LEN, dy as f32 * BLOCK_LEN);
-                }
+                raster_soup(&mut cells, &mut depth, &basis, cols, rows, soup, light, fog_span, dx as f32 * BLOCK_LEN, dy as f32 * BLOCK_LEN);
             }
         }
     }
-    if !statics.is_empty() {
-        raster_statics(&mut cells, &mut depth, &basis, cols, rows, statics, cam, light, fog_span);
+    // Statics (the flat building boxes), env cells (the wall/ceiling/floor
+    // shells), props and building meshes are drawn for all nine grid blocks,
+    // each shifted into the periodic 192u frame: a building in a neighbor
+    // landblock stays visible past the boundary until the fog (FOG_END <
+    // 192) takes it, instead of popping out when the player crosses into
+    // the neighboring block.
+    for (i, g) in neighborhood.iter().enumerate() {
+        if g.statics.is_empty() {
+            continue;
+        }
+        let (ox, oy) = off(i);
+        raster_statics(&mut cells, &mut depth, &basis, cols, rows, &g.statics, cam, light, fog_span, ox, oy);
     }
-    // The building whose region contains the camera: from inside, the
-    // detailed GfxObj mesh (building_soup) is the building's representation,
-    // so the env-cell slabs that overlap its footprint are skipped — they
-    // paint flat grey (unresolved-texture) over the interior, including the
-    // staircase. From outside, the env cells represent the building.
-    let inside_buildings: Vec<(u32, Aabb, Vec<f32>)> = building_soup
-        .iter()
-        .filter(|(_, r, _)| {
-            cam.x >= r[0] && cam.x <= r[3]
-                && cam.y >= r[1] && cam.y <= r[4]
-                && cam.z >= r[2] && cam.z <= r[5]
-        })
-        .cloned()
-        .collect();
-    // Env (indoor/structure) cells: the walls/ceiling/floor of the current
-    // landblock's rooms. The cell the player stands in is skipped (its shell
-    // would wall in the interior); env cells overlapping an inside building's
-    // footprint are also skipped (they'd paint over the building mesh).
-    let cam_cell = env_cell_at(env_soup, cam);
-    let env_to_draw: Vec<(u32, Aabb, Vec<f32>)> = env_soup
-        .iter()
-        .filter(|(c, r, _)| {
-            Some(*c) != cam_cell
-                && !inside_buildings.iter().any(|(_, br, _)| {
-                    r[0] < br[3] && r[3] > br[0] && r[1] < br[4] && r[4] > br[1]
-                })
-        })
-        .cloned()
-        .collect();
-    if !env_to_draw.is_empty() {
-        raster_env_soup(
-            &mut cells,
-            &mut depth,
-            &basis,
-            cols,
-            rows,
-            &env_to_draw,
-            None,
-            light,
-            fog_span,
-        );
+    // The building whose region contains the camera (in any grid block):
+    // from inside, the detailed GfxObj mesh (building soup) is the
+    // building's representation, so the env-cell slabs that overlap its
+    // footprint are skipped — they paint flat grey (unresolved-texture)
+    // over the interior, including the staircase. From outside, the env
+    // cells represent the building.
+    let mut inside_buildings: Vec<(&[f32], Aabb, f32, f32)> = Vec::new();
+    for (i, g) in neighborhood.iter().enumerate() {
+        if g.buildings.is_empty() {
+            continue;
+        }
+        let (ox, oy) = off(i);
+        for (_id, r, s) in g.buildings.iter() {
+            let sr: Aabb = [r[0] + ox, r[1] + oy, r[2], r[3] + ox, r[4] + oy, r[5]];
+            if cam.x >= sr[0] && cam.x <= sr[3]
+                && cam.y >= sr[1] && cam.y <= sr[4]
+                && cam.z >= sr[2] && cam.z <= sr[5]
+            {
+                inside_buildings.push((s.as_slice(), *r, ox, oy));
+            }
+        }
+    }
+    // Env (indoor/structure) cells: the walls/ceiling/floor of the rooms in
+    // every grid block. The cell whose region contains the camera (in that
+    // block's frame) is skipped (its shell would wall in the interior); env
+    // cells overlapping an inside building's footprint are also skipped
+    // (they'd paint over the building mesh).
+    for (i, g) in neighborhood.iter().enumerate() {
+        if g.env.is_empty() {
+            continue;
+        }
+        let (ox, oy) = off(i);
+        // The camera expressed in this block's frame.
+        let cam_cell = env_cell_at_xy(&g.env, cam.x - ox, cam.y - oy, cam.z);
+        for (c, r, s) in g.env.iter() {
+            if Some(*c) == cam_cell {
+                continue;
+            }
+            let sr: Aabb = [r[0] + ox, r[1] + oy, r[2], r[3] + ox, r[4] + oy, r[5]];
+            if inside_buildings.iter().any(|(_, br, _, _)| {
+                sr[0] < br[3] && sr[3] > br[0] && sr[1] < br[4] && sr[4] > br[1]
+            }) {
+                continue;
+            }
+            // The current block keeps the historical copy reference (the
+            // camera — the toroidal copy nearest the viewer); a neighbor
+            // block draws the copy inside that block (its center), not the
+            // toroidal image 192u across the current one.
+            let (rx, ry) = if i == 4 {
+                (basis.cam[0], basis.cam[1])
+            } else {
+                (96.0, 96.0)
+            };
+            raster_env_cell(&mut cells, &mut depth, &basis, cols, rows, s, light, fog_span, ox, oy, rx, ry);
+        }
     }
     // Placed GfxObj props (furniture/barrels/lamps): the full visual mesh,
-    // drawn after the env cells so interior props sit on top of the room.
-    // `cam_cell: None` — a prop is always drawn (unlike the env shell, which
-    // is skipped when the camera is inside so it doesn't wall in the room).
-    if !prop_soup.is_empty() {
-        raster_env_soup(
-            &mut cells,
-            &mut depth,
-            &basis,
-            cols,
-            rows,
-            &prop_soup,
-            None,
-            light,
-            fog_span,
-        );
+    // drawn after the env cells so interior props sit on top of the room. A
+    // prop is always drawn (unlike the env shell, which is skipped when the
+    // camera is inside so it doesn't wall in the room).
+    for (i, g) in neighborhood.iter().enumerate() {
+        if g.props.is_empty() {
+            continue;
+        }
+        let (ox, oy) = off(i);
+        for (_id, _r, s) in g.props.iter() {
+            raster_gfx_mesh(&mut cells, &mut depth, &basis, cols, rows, s, light, fog_span, ox, oy);
+        }
     }
     // Building GfxObj visual meshes (the detailed multi-material model a
     // town's shop is made of: walls + the interior props — paintings,
     // barrels, lamps). Drawn only for the building whose region contains the
     // camera: from inside, the env-cell shell that duplicates the building's
-    // outer walls is already skipped (cam_cell), so the interior shows with
-    // no wall z-fight; from outside, the env cells represent the building.
-    // The region is world-space, so the containment test is direct.
-    if !inside_buildings.is_empty() {
-        raster_env_soup(
-            &mut cells,
-            &mut depth,
-            &basis,
-            cols,
-            rows,
-            &inside_buildings,
-            None,
-            light,
-            fog_span,
-        );
+    // outer walls is already skipped, so the interior shows with no wall
+    // z-fight; from outside, the env cells represent the building.
+    for (s, _r, ox, oy) in &inside_buildings {
+        raster_gfx_mesh(&mut cells, &mut depth, &basis, cols, rows, s, light, fog_span, *ox, *oy);
     }
     // The GfxObj statics placed inside the env cells (the shop's interior
     // props: stairs, candlesticks, paintings). Drawn last of the geometry so
     // they sit on top of the room's walls/floor/building mesh.
-    if !env_props.is_empty() {
-        raster_env_soup(
-            &mut cells,
-            &mut depth,
-            &basis,
-            cols,
-            rows,
-            &env_props,
-            None,
-            light,
-            fog_span,
-        );
+    for (i, g) in neighborhood.iter().enumerate() {
+        if g.env_props.is_empty() {
+            continue;
+        }
+        let (ox, oy) = off(i);
+        for (_id, _r, s) in g.env_props.iter() {
+            raster_gfx_mesh(&mut cells, &mut depth, &basis, cols, rows, s, light, fog_span, ox, oy);
+        }
     }
     // Rasterize the swung slabs (the swings already advanced above).
     for d in doors.values() {
@@ -1798,7 +1940,7 @@ mod tests {
         let mut anim = HashMap::new();
         let mut doors = HashMap::new();
         let _frame = render_frame(
-            &mut scene, &mut zoom, &mut anim, &[], &[], &[], &mut doors,
+            &mut scene, &mut zoom, &mut anim, &[], &std::array::from_fn(|_| BlockGeom::default()), &mut doors,
             lb, &cam, &[], 80, 24, false, None, false, None,
         ).expect("frame for a terrain landblock");
 
@@ -1869,43 +2011,275 @@ mod tests {
         let mut anim = HashMap::new();
         let mut doors = HashMap::new();
 
-        // Cramped room: the wall blocks the camera → first-person head view.
+        // Cramped room: the wall (in the current block, neighborhood center)
+        // blocks the camera → first-person head view.
+        let mut nb = std::array::from_fn(|_| BlockGeom::default());
+        nb[4].statics = vec![wall.clone()];
+        nb[4].env = env_soup.clone();
         let frame = render_frame(
-            &mut scene, &mut Zoom::new(), &mut anim, &[wall.clone()], &[], &env_soup, &mut doors,
+            &mut scene, &mut Zoom::new(), &mut anim, &[], &nb, &mut doors,
             0, &cam, &[self_actor.clone()], 80, 24, false, None, false, Some(1),
         ).expect("frame in the cramped room");
         assert!(frame.first_person, "a wall 6u behind the player must force first-person");
 
         // Open space (no wall) → the follow (third-person) camera is kept.
+        let mut nb2 = std::array::from_fn(|_| BlockGeom::default());
+        nb2[4].env = env_soup;
         let frame2 = render_frame(
-            &mut scene, &mut Zoom::new(), &mut anim, &[], &[], &env_soup, &mut doors,
+            &mut scene, &mut Zoom::new(), &mut anim, &[], &nb2, &mut doors,
             0, &cam, &[self_actor.clone()], 80, 24, false, None, false, Some(1),
         ).expect("frame in open space");
-        assert!(!frame2.first_person, "open space must keep the follow camera");
+        assert!(!frame2.first_person, "no wall → the follow camera is kept");
     }
 
-    // The phantom-walls fix: `env_cell_at` reports the cell the player stands
-    // in so its shell is skipped. Inside on every axis → the cell; outside on
-    // any axis → none. Multiple cells → the containing one.
+    // The phantom-walls fix: `env_cell_at_xy` reports the cell the player
+    // stands in (in that block's frame) so its shell is skipped. Inside on
+    // every axis → the cell; outside on any axis → none. Multiple cells →
+    // the containing one.
     #[test]
     fn env_cell_at_inside_and_outside() {
         let shop: Aabb = [80.0, 80.0, 0.0, 112.0, 112.0, 10.0];
         let tower: Aabb = [140.0, 140.0, 0.0, 160.0, 160.0, 40.0];
         let soups: Vec<(u32, Aabb, Vec<f32>)> =
             vec![(0x17b20100, shop, Vec::new()), (0x17b20101, tower, Vec::new())];
-        let cam = |x, y, z| Camera { x, y, z, heading: 0.0 };
         // Inside the shop (x/y in 80..112, z in 0..10).
-        assert_eq!(env_cell_at(&soups, &cam(96.0, 96.0, 5.0)), Some(0x17b20100));
+        assert_eq!(env_cell_at_xy(&soups, 96.0, 96.0, 5.0), Some(0x17b20100));
         // Inside the tower (x/y in 140..160, z in 0..40).
-        assert_eq!(env_cell_at(&soups, &cam(150.0, 150.0, 20.0)), Some(0x17b20101));
+        assert_eq!(env_cell_at_xy(&soups, 150.0, 150.0, 20.0), Some(0x17b20101));
         // Outside on x (west of the shop).
-        assert_eq!(env_cell_at(&soups, &cam(20.0, 96.0, 5.0)), None);
+        assert_eq!(env_cell_at_xy(&soups, 20.0, 96.0, 5.0), None);
         // Outside on y (north of the shop).
-        assert_eq!(env_cell_at(&soups, &cam(96.0, 180.0, 5.0)), None);
+        assert_eq!(env_cell_at_xy(&soups, 96.0, 180.0, 5.0), None);
         // Above the shop's roof (z > 10) but inside its x/y footprint.
-        assert_eq!(env_cell_at(&soups, &cam(96.0, 96.0, 50.0)), None);
+        assert_eq!(env_cell_at_xy(&soups, 96.0, 96.0, 50.0), None);
         // Below the floor (z < 0).
-        assert_eq!(env_cell_at(&soups, &cam(96.0, 96.0, -5.0)), None);
+        assert_eq!(env_cell_at_xy(&soups, 96.0, 96.0, -5.0), None);
+    }
+
+    /// Regression: a triangle with a vertex behind the near plane must be
+    /// clipped, not dropped whole. Before the clip, `project` returned
+    /// `None` for a behind vertex and the whole triangle was skipped — at a
+    /// close (zoomed-in) camera the terrain quad under the player straddles
+    /// the near plane, which holed the ground at the bottom of the pane.
+    #[test]
+    fn raster_tri_clips_near_plane() {
+        let (cols, rows) = (80usize, 24usize);
+        let b = Basis {
+            cam: [0.0, 0.0, 0.0],
+            f: [0.0, 1.0, 0.0],
+            r: [1.0, 0.0, 0.0],
+            u: [0.0, 0.0, 1.0],
+            focal: 8.0,
+            sc: [(cols - 1) as f32 / 2.0, (rows - 1) as f32 / 2.0],
+        };
+        let light = (LIGHT.0, LIGHT.1, LIGHT.2);
+        let fog_span = FOG_END - FOG_START;
+        let marker: [u8; 3] = [1, 2, 3];
+        let total = cols * rows;
+
+        // Triangle in the z = 1 plane (camera at the origin, off-plane):
+        // vertex A is behind the near plane (zc = -3 < 0.5), B and C in
+        // front. The clipped front part must rasterize.
+        let mut cells = vec![marker; total];
+        let mut depth = vec![f32::INFINITY; total];
+        raster_tri(
+            &mut cells,
+            &mut depth,
+            &b,
+            cols,
+            rows,
+            (0.0, -3.0, 1.0),
+            (0.0, 4.0, 1.0),
+            (2.0, 4.0, 1.0),
+            (0.2, 0.4, 0.6),
+            light,
+            fog_span,
+        );
+        // The clip polygon's screen triangle covers cell (40, 8) in its
+        // interior (vertices (39.5,7.5), (39.5,9.5), (43.5,9.5)).
+        let idx = 8 * cols + 40;
+        assert_ne!(cells[idx], marker, "the clipped front part must rasterize");
+        assert!(depth[idx] < f32::INFINITY);
+        // A far pane corner stays untouched.
+        assert_eq!(cells[0], marker);
+
+        // A triangle entirely behind the near plane draws nothing.
+        let mut cells = vec![marker; total];
+        let mut depth = vec![f32::INFINITY; total];
+        raster_tri(
+            &mut cells,
+            &mut depth,
+            &b,
+            cols,
+            rows,
+            (0.0, -3.0, 1.0),
+            (1.0, -2.0, 1.0),
+            (2.0, -3.0, 1.0),
+            (0.2, 0.4, 0.6),
+            light,
+            fog_span,
+        );
+        assert!(
+            cells.iter().all(|c| *c == marker),
+            "a fully behind triangle must not rasterize"
+        );
+    }
+
+    /// Regression: statics and env-cell shells in a neighbor landblock must
+    /// reach the pane — before the 3×3 fix only the player's block geometry
+    /// was fetched and drawn, so crossing a landblock boundary popped the
+    /// neighbor's buildings out while they were still inside the fog. The
+    /// box sits block-local y 20..40 in the north neighbor: it is drawn at
+    /// its true position (y 212..232, 92..112u ahead of the player, inside
+    /// the fog). A toroidal-wrap renderer would draw the camera-near copy
+    /// instead (y 20..40 — behind this camera) and leave the asserted
+    /// region sky, so this also guards the no-wrap rule.
+    #[test]
+    fn neighbor_block_geometry_is_drawn() {
+        let mut scene = Scene::unavailable(Some("/nonexistent-ac-dats".to_string()));
+        let mut zoom = Zoom::new();
+        let mut anim = HashMap::new();
+        let mut doors = HashMap::new();
+        // Player inside the current block, facing +Y (north); the follow
+        // camera sits behind at (96, 107, 6.5).
+        let cam = Camera { x: 96.0, y: 120.0, z: 0.0, heading: 0.0 };
+        // A flat building box in the north neighbor (dy = +1 → index 7),
+        // block-local x 80..112, y 20..40, z 0..12 (global y 212..232,
+        // 92..112u ahead of the player — inside the fog).
+        let building_box = Solid {
+            tris: vec![
+                80.0, 20.0, 0.0, 112.0, 20.0, 0.0, 112.0, 20.0, 12.0,
+                80.0, 20.0, 0.0, 112.0, 20.0, 12.0, 80.0, 20.0, 12.0,
+                80.0, 40.0, 0.0, 112.0, 40.0, 12.0, 112.0, 40.0, 0.0,
+                80.0, 40.0, 0.0, 80.0, 40.0, 12.0, 112.0, 40.0, 12.0,
+                80.0, 20.0, 12.0, 112.0, 20.0, 12.0, 112.0, 40.0, 12.0,
+                80.0, 20.0, 12.0, 112.0, 40.0, 12.0, 80.0, 40.0, 12.0,
+            ],
+            bbox: [80.0, 20.0, 0.0, 112.0, 40.0, 12.0],
+            building: true,
+            ..Default::default()
+        };
+        // An env-cell floor slab in the same neighbor (block-local
+        // 80..112 × 10..42, z = 1 → global y 202..234). Its region keeps
+        // the camera's in-block position (96, 120-192 = -72 ≡ 120) outside,
+        // so the "camera inside this cell" rule does not cull it.
+        let floor = vec![
+            80.0, 10.0, 1.0, 112.0, 10.0, 1.0, 80.0, 42.0, 1.0, 0.8, 0.7, 0.6,
+            112.0, 10.0, 1.0, 112.0, 42.0, 1.0, 80.0, 42.0, 1.0, 0.8, 0.7, 0.6,
+        ];
+        let env = vec![(0x30740100u32, [80.0, 10.0, 0.0, 112.0, 42.0, 2.0] as Aabb, floor)];
+        let mut nb = std::array::from_fn(|_| BlockGeom::default());
+        nb[7].statics.push(building_box);
+        nb[7].env = env;
+        let frame = render_frame(
+            &mut scene,
+            &mut zoom,
+            &mut anim,
+            &[],
+            &nb,
+            &mut doors,
+            0,
+            &cam,
+            &[],
+            80,
+            24,
+            false,
+            None,
+            false,
+            None,
+        )
+        .expect("a frame with neighbor-block geometry");
+        // The box's front face projects to the upper-middle pane
+        // (x ≈ 35..44, y ≈ 0.8..4); the floor slab is fully fogged but
+        // still paints fog color near the center. Any non-sky cell in rows
+        // 0..7 / cols 30..49 is neighbor-block geometry — nothing else is
+        // in this scene. (A toroidal-wrap renderer draws both 192u behind
+        // the camera and leaves this whole region sky.)
+        let mut found = false;
+        for r in 0..8 {
+            for c in 30..50 {
+                let t = r as f32 / (frame.rows - 1) as f32;
+                let sky = [
+                    cl8(52.0 + t * 66.0),
+                    cl8(84.0 + t * 84.0),
+                    cl8(150.0 + t * 74.0),
+                ];
+                if frame.cells[r * frame.cols + c] != sky {
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "neighbor-block geometry must reach the pane");
+    }
+
+    /// Regression (prop vanishing at the landblock transition): a prop in
+    /// the middle of the block the player is walking into must stay at its
+    /// true position — 96u ahead — on both sides of the boundary. A
+    /// toroidal-wrap renderer draws the camera-near periodic copy instead
+    /// (192u across, behind the player) and the prop vanishes exactly when
+    /// the current landblock changes (C98C → C98D in the field report).
+    #[test]
+    fn neighbor_prop_survives_block_transition() {
+        let mut scene = Scene::unavailable(Some("/nonexistent-ac-dats".to_string()));
+        let mut anim = HashMap::new();
+        let mut doors = HashMap::new();
+        // A prop box in the north block at its middle: block-local
+        // x 90..102, y 96..104, z 0..8.
+        let prop = Solid {
+            tris: vec![
+                90.0, 96.0, 0.0, 102.0, 96.0, 0.0, 102.0, 96.0, 8.0,
+                90.0, 96.0, 0.0, 102.0, 96.0, 8.0, 90.0, 96.0, 8.0,
+                90.0, 104.0, 0.0, 102.0, 104.0, 8.0, 102.0, 104.0, 0.0,
+                90.0, 104.0, 0.0, 90.0, 104.0, 8.0, 102.0, 104.0, 8.0,
+                90.0, 96.0, 8.0, 102.0, 96.0, 8.0, 102.0, 104.0, 8.0,
+                90.0, 96.0, 8.0, 102.0, 104.0, 8.0, 90.0, 104.0, 8.0,
+            ],
+            bbox: [90.0, 96.0, 0.0, 102.0, 104.0, 8.0],
+            building: false,
+            ..Default::default()
+        };
+        // The prop's front face projects to rows 1..3, cols 38..40 in both
+        // frames (same global geometry); assert a slightly wider region.
+        let check = |frame: &Frame3D| -> bool {
+            for r in 1..4 {
+                for c in 37..41 {
+                    let t = r as f32 / (frame.rows - 1) as f32;
+                    let sky = [
+                        cl8(52.0 + t * 66.0),
+                        cl8(84.0 + t * 84.0),
+                        cl8(150.0 + t * 74.0),
+                    ];
+                    if frame.cells[r * frame.cols + c] != sky {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+        // Frame 1: the player at the south block's north edge (y 191.8,
+        // walking north) — the prop is in the north neighbor (index 7) and
+        // must draw at its true position, 96..104u ahead.
+        let mut nb = std::array::from_fn(|_| BlockGeom::default());
+        nb[7].statics.push(prop.clone());
+        let cam = Camera { x: 96.0, y: 191.8, z: 0.0, heading: 0.0 };
+        let frame = render_frame(
+            &mut scene, &mut Zoom::new(), &mut anim, &[], &nb, &mut doors,
+            0, &cam, &[], 80, 24, false, None, false, None,
+        )
+        .expect("frame just inside the south block");
+        assert!(check(&frame), "prop ahead in the north neighbor must be visible before the transition");
+        // Frame 2: the player just inside the north block (y 0.2) — the
+        // prop is now the current block's (index 4) and must draw at the
+        // same global position, not a periodic image behind the player.
+        let mut nb2 = std::array::from_fn(|_| BlockGeom::default());
+        nb2[4].statics.push(prop);
+        let cam = Camera { x: 96.0, y: 0.2, z: 0.0, heading: 0.0 };
+        let frame = render_frame(
+            &mut scene, &mut Zoom::new(), &mut anim, &[], &nb2, &mut doors,
+            0, &cam, &[], 80, 24, false, None, false, None,
+        )
+        .expect("frame just inside the north block");
+        assert!(check(&frame), "prop must not vanish when the landblock changes");
     }
 
     /// A vertical wall triangle at x = 10, spanning y 0..20 and z 0..5
@@ -2098,7 +2472,7 @@ mod tests {
         let lb = 0x3073u32; // (48, 115): terrain + hundreds of statics
         let mut zoom = Zoom::new();
         let mut anim = HashMap::new();
-        let statics = scene.solids_for_block(lb);
+        let mut nb = std::array::from_fn(|_| BlockGeom::default());
         let mut doors = HashMap::new();
         let cam = Camera {
             x: 96.0,
@@ -2144,13 +2518,19 @@ mod tests {
             r: 0.7,
             half_h: 1.4,
         };
+        nb[4] = BlockGeom {
+            statics: scene.solids_for_block(lb),
+            env: scene.env_soup(lb),
+            props: scene.prop_soup(lb),
+            buildings: scene.building_soup(lb),
+            env_props: scene.env_props(lb),
+        };
         let frame = render_frame(
             &mut scene,
             &mut zoom,
             &mut anim,
-            &statics,
             &[],
-            &[],
+            &nb,
             &mut doors,
             lb,
             &cam,
@@ -2180,9 +2560,8 @@ mod tests {
             &mut scene,
             &mut zoom,
             &mut anim,
-            &statics,
             &[],
-            &[],
+            &nb,
             &mut doors,
             lb,
             &cam,
@@ -2228,7 +2607,8 @@ mod tests {
             return;
         };
         let lb = 0x3073u32;
-        let statics = scene.solids_for_block(lb);
+        let mut nb = std::array::from_fn(|_| BlockGeom::default());
+        nb[4].statics = scene.solids_for_block(lb);
         let mut doors = HashMap::new();
         let cam = Camera {
             x: 96.0,
@@ -2244,9 +2624,8 @@ mod tests {
                 &mut scene,
                 zoom,
                 &mut anim,
-                &statics,
                 &[],
-                &[],
+                &nb,
                 &mut doors,
                 lb,
                 &cam,
@@ -2295,8 +2674,7 @@ mod tests {
             &mut zoom,
             &mut anim,
             &[],
-            &[],
-            &[],
+            &std::array::from_fn(|_| BlockGeom::default()),
             &mut HashMap::new(),
             0,
             &cam,
@@ -2317,8 +2695,7 @@ mod tests {
                 &mut zoom,
                 &mut anim,
                 &[],
-                &[],
-                &[],
+                &std::array::from_fn(|_| BlockGeom::default()),
                 &mut HashMap::new(),
                 0,
                 &cam,

@@ -989,12 +989,12 @@ impl World {
         if sb == eb {
             return ((e.pos.x - self_pos.x).powi(2) + (e.pos.y - self_pos.y).powi(2) + (e.pos.z - self_pos.z).powi(2)).sqrt();
         }
-        let sbx = (sb & 0xFFFF) as f32;
-        let sby = (sb >> 16) as f32;
-        let ebx = (eb & 0xFFFF) as f32;
-        let eby = (eb >> 16) as f32;
-        let dx = (sbx - ebx) * 192.0 + (e.pos.x - self_pos.x);
-        let dy = (sby - eby) * 192.0 + (e.pos.y - self_pos.y);
+        let sbx = ((sb >> 8) & 0xFF) as f32;
+        let sby = (sb & 0xFF) as f32;
+        let ebx = ((eb >> 8) & 0xFF) as f32;
+        let eby = (eb & 0xFF) as f32;
+        let dx = (ebx - sbx) * 192.0 + (e.pos.x - self_pos.x);
+        let dy = (eby - sby) * 192.0 + (e.pos.y - self_pos.y);
         let dz = e.pos.z - self_pos.z;
         (dx * dx + dy * dy + dz * dz).sqrt()
     }
@@ -1103,5 +1103,52 @@ mod tests {
         assert_eq!(w.examine.attrs, [0; 6], "weapon must not show stale creature attrs");
         assert_eq!(w.examine.vitals, [0; 3], "weapon must not show stale creature vitals");
         assert_eq!(w.examine.damage_min, 5, "weapon damage must be set");
+    }
+
+    /// Regression: the cross-block distance must apply the 192u block
+    /// offset on the right axis. The old decomposition (`sbx = sb &
+    /// 0xFFFF`, `sby = sb >> 16`) turned a landblock id like 0xC98D into
+    /// the bogus coordinate 51597.0: an NPC 6u across the boundary (true
+    /// distance ~9u) measured ~260u away and was far-culled shortly after
+    /// the crossing ("the town crier disappears at the C98C->C98D edge").
+    #[test]
+    fn dist_cross_block_uses_true_offset() {
+        let ent = |cell: u32, x: f32, y: f32| Entity {
+            guid: 2,
+            name: None,
+            cell,
+            pos: Vec3 { x, y, z: 22.0 },
+            rot: [1.0, 0.0, 0.0, 0.0],
+            is_player: false,
+            health: None,
+            health_max: None,
+            mana: None,
+            mana_max: None,
+            item_type: ITEM_TYPE_CREATURE,
+            setup_id: None,
+            mtable_id: None,
+            model_parts: None,
+            motion_cmd: 0,
+            style: 0,
+            physics_state: 0,
+            is_vendor: false,
+            use_radius: None,
+            last_seen: Instant::now(),
+        };
+        let w = World::new();
+        // Self 0.5u inside C98D's south edge; the crier 6.2u across it in
+        // C98C (block-local y = 185.8): true offset (5.7, -6.7) -> 8.8u.
+        let south = ent(0xC98C_0005, 108.8, 185.8);
+        let d = w.dist(0xC98D_0005, &Vec3 { x: 103.1, y: 0.5, z: 22.0 }, &south);
+        assert!((d - 8.8).abs() < 0.1, "south neighbor: {d}");
+        // The symmetric crossing of the north edge: self 0.5u from C98D's
+        // north edge, the NPC 6.2u into C98E.
+        let north = ent(0xC98E_0005, 108.8, 6.2);
+        let d = w.dist(0xC98D_0005, &Vec3 { x: 103.1, y: 191.5, z: 22.0 }, &north);
+        assert!((d - 8.8).abs() < 0.1, "north neighbor: {d}");
+        // Same block: the plain local offset.
+        let same = ent(0xC98D_0005, 108.8, 10.0);
+        let d = w.dist(0xC98D_0005, &Vec3 { x: 103.1, y: 0.5, z: 22.0 }, &same);
+        assert!((d - 11.1).abs() < 0.1, "same block: {d}");
     }
 }

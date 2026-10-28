@@ -30,7 +30,7 @@ use crate::world::{
     MAIN_PACK_CAPACITY, ITEM_TYPE_CONTAINER, ITEM_TYPE_CREATURE, ITEM_TYPE_DOOR,
     TARGET_ITEM_CONTAINER, TARGET_ITEM_PACK, TARGET_ITEM_SHOP, TARGET_ITEM_TRADE,
 };
-use acgeo::{Actor, Camera, ReticleTarget, get_dereth_land, wrap_block_coord, ACTOR_SCALE};
+use acgeo::{Actor, Camera, ReticleTarget, get_dereth_land, ACTOR_SCALE};
 
 /// True if the single unified target is the item `guid` (in any pack / shop /
 /// trade / opened container).
@@ -850,9 +850,11 @@ fn draw_world3d(f: &mut Frame, app: &mut App, lb: WLayout) {
     let heading = app.movement.as_ref().map(|m| m.heading).unwrap_or(0.0);
     // Build the render inputs before the mutable render borrow.
     let actors = build_actors(app);
+    // The camera is the player's position in the current block's frame (the
+    // movement sim keeps it block-local); no periodic wrap.
     let cam = Camera {
-        x: wrap_block_coord(sp.x),
-        y: wrap_block_coord(sp.y),
+        x: sp.x,
+        y: sp.y,
         z: sp.z,
         heading,
     };
@@ -887,8 +889,11 @@ fn draw_world3d(f: &mut Frame, app: &mut App, lb: WLayout) {
 /// lags the last server update) and a gold glow.
 fn build_actors(app: &App) -> Vec<Actor> {
     let mut actors: Vec<Actor> = Vec::new();
-    let (_self_cell, self_pos) = app.self_position();
+    let (self_cell, self_pos) = app.self_position();
     let self_heading = app.movement.as_ref().map(|m| m.heading).unwrap_or(0.0);
+    // The self's landblock, for shifting neighbor-block entities into the
+    // self's frame (an entity's pos is block-local to its own block).
+    let sb = (self_cell >> 16) & 0xFFFF;
     for e in app.world.entities.values() {
         if Some(e.guid) == app.self_guid {
             // The sim heading h means "moved h toward +X from +Y" (the camera
@@ -938,10 +943,16 @@ fn build_actors(app: &App) -> Vec<Actor> {
         } else {
             None
         };
+        // Shift the entity into the self's block frame: a just-crossed
+        // neighbor (192u across the edge) stays at its true position
+        // instead of wrapping to the far side of the block.
+        let eb = e.block();
+        let dbx = (((eb >> 8) & 0xFF) as i32 - ((sb >> 8) & 0xFF) as i32) as f32 * 192.0;
+        let dby = ((eb & 0xFF) as i32 - (sb & 0xFF) as i32) as f32 * 192.0;
         actors.push(Actor {
             guid: e.guid,
-            x: e.pos.x,
-            y: e.pos.y,
+            x: e.pos.x + dbx,
+            y: e.pos.y + dby,
             z: e.pos.z,
             quat: e.rot,
             mtable_id: e.mtable_id,
@@ -983,10 +994,16 @@ fn reticle_target(app: &App) -> Option<ReticleTarget> {
     }
     let guid = app.current_target()?;
     let e = app.world.entities.get(&guid)?;
+    // Same block-delta shift as build_actors: the target's pos is
+    // block-local to its own landblock.
+    let sb = (cell >> 16) & 0xFFFF;
+    let eb = e.block();
+    let dx = (((eb >> 8) & 0xFF) as i32 - ((sb >> 8) & 0xFF) as i32) as f32 * 192.0;
+    let dy = ((eb & 0xFF) as i32 - (sb & 0xFF) as i32) as f32 * 192.0;
     let (r, half_h) = entity_half_extents(e);
     Some(ReticleTarget {
-        x: e.pos.x,
-        y: e.pos.y,
+        x: e.pos.x + dx,
+        y: e.pos.y + dy,
         z: e.pos.z,
         r,
         half_h,
@@ -3607,12 +3624,15 @@ fn pick_world3d(app: &App, lb: WLayout, r: u16, c: u16) -> Option<u32> {
         return None;
     }
     let heading = app.movement.as_ref().map(|m| m.heading).unwrap_or(0.0);
+    // Camera in the current block's frame (block-local, no periodic wrap);
+    // entities shift in by their landblock delta (see build_actors).
     let cam = Camera {
-        x: wrap_block_coord(sp.x),
-        y: wrap_block_coord(sp.y),
+        x: sp.x,
+        y: sp.y,
         z: sp.z,
         heading,
     };
+    let sb = (cell >> 16) & 0xFFFF;
     let w3d = app.world3d.as_ref();
     // Match the renderer's live camera — it tracks the wheel zoom and drops
     // to first-person in a cramped room — so the pick projection lines up
@@ -3636,8 +3656,10 @@ fn pick_world3d(app: &App, lb: WLayout, r: u16, c: u16) -> Option<u32> {
             continue;
         }
         let (r_h, half_h) = entity_half_extents(e);
-        let ax = wrap_block_coord(e.pos.x);
-        let ay = wrap_block_coord(e.pos.y);
+        // Shift the anchor into the self's block frame (see build_actors).
+        let eb = e.block();
+        let ax = e.pos.x + (((eb >> 8) & 0xFF) as i32 - ((sb >> 8) & 0xFF) as i32) as f32 * 192.0;
+        let ay = e.pos.y + ((eb & 0xFF) as i32 - (sb & 0xFF) as i32) as f32 * 192.0;
         let z0 = e.pos.z;
         let z1 = e.pos.z + 2.0 * half_h;
         let mut minx = f32::INFINITY;
@@ -3645,8 +3667,9 @@ fn pick_world3d(app: &App, lb: WLayout, r: u16, c: u16) -> Option<u32> {
         let mut maxx = f32::NEG_INFINITY;
         let mut maxy = f32::NEG_INFINITY;
         // Project the body box's 8 corners into an axis-aligned screen box
-        // (the render wraps the actor origin, not its local vertices, so the
-        // corners are the wrapped origin plus an unwrapped offset).
+        // (the render offsets the actor origin by the same block delta, not
+        // its local vertices, so the corners are that origin plus an
+        // unwrapped offset).
         for (cx, cy) in [
             (ax - r_h, ay - r_h),
             (ax + r_h, ay - r_h),
@@ -4954,5 +4977,58 @@ mod tests {
         // Terrain / non-objects and POI markers are not targetable.
         assert!(!super::is_world_entity(&ent(0)));
         assert!(!super::is_world_entity(&ent(super::ITEM_TYPE_POI)));
+    }
+
+    /// Regression: an entity in a neighbor landblock must be placed in the
+    /// self block's frame at its true offset. The old `% 192` wrap put an
+    /// NPC 6u across the boundary on the far side of the block — 172u
+    /// behind a south-facing camera — so the "town crier" and other
+    /// neighbor-block actors vanished the moment the player crossed
+    /// C98C->C98D.
+    #[test]
+    fn build_actors_shifts_neighbor_block_into_self_frame() {
+        use crate::movement::Movement;
+        use crate::world::Entity;
+        let mut app = App::new("127.0.0.1", 9000, "acct", "pass");
+        app.phase = Phase::InWorld;
+        app.self_guid = Some(1);
+        // Self: 0.5u inside C98D's south edge.
+        app.movement = Some(Movement::new(
+            0xC98D_0005,
+            acproto::codec::Vec3 { x: 103.1, y: 0.5, z: 22.0 },
+        ));
+        // Crier: 6.2u across the boundary in C98C (block-local y = 185.8).
+        let crier = Entity {
+            guid: 2,
+            name: None,
+            cell: 0xC98C_0005,
+            pos: acproto::codec::Vec3 { x: 108.8, y: 185.8, z: 22.0 },
+            rot: [1.0, 0.0, 0.0, 0.0],
+            is_player: false,
+            health: None,
+            health_max: None,
+            mana: None,
+            mana_max: None,
+            item_type: super::ITEM_TYPE_CREATURE,
+            setup_id: Some(0x02000001),
+            mtable_id: Some(0x09000001),
+            model_parts: None,
+            motion_cmd: 0,
+            style: 0,
+            physics_state: 0,
+            is_vendor: false,
+            use_radius: None,
+            last_seen: std::time::Instant::now(),
+        };
+        app.world.entities.insert(crier.guid, crier);
+        let actors = super::build_actors(&app);
+        let a = actors
+            .iter()
+            .find(|a| a.guid == 2)
+            .expect("crier actor must be built");
+        // True position in the self frame: 6.2u south of the boundary
+        // (y = -6.2), not wrapped to the far side of the block (y = 185.8).
+        assert!((a.x - 108.8).abs() < 1e-3, "crier x: {}", a.x);
+        assert!((a.y + 6.2).abs() < 1e-3, "crier wrapped to the far side: {}", a.y);
     }
 }

@@ -1752,4 +1752,82 @@ mod tests {
         assert!(scene.solids_for_block(0).is_empty());
         assert_eq!(scene.setup_aabb(0x02000001), None);
     }
+
+    /// Crossing the C98C->C98D boundary must not change what is visible.
+    /// F2 (grid centered on C98D, player just inside its south edge) and
+    /// F1b (grid centered on C98C, the SAME world camera) are one and the
+    /// same world view; both historical crossing bugs showed up as
+    /// F2-vs-F1b differences here:
+    ///  - the town crier actor, whose old `%192` wrap placed it 172u behind
+    ///    the camera in the crossed frame (it drew nothing);
+    ///  - the fully-fogged horizon band, whose old fixed-color rim jumped
+    ///    192u when the 3x3 grid re-centered (a visible haze band popping).
+    /// Gated on the retail dats (the C98C town must actually load).
+    #[test]
+    fn render_block_crossing_invariant() {
+        let Some(dir) = dats::find_dat_dir(None) else {
+            eprintln!("skipped: retail dats unavailable");
+            return;
+        };
+        let mut w = crate::World3D::new(Some(&dir));
+        assert!(w.available(), "retail dats present but scene unavailable");
+        let h = std::f32::consts::PI; // facing -Y (south), toward the C98C town
+        let crier = |x: f32, y: f32| crate::Actor {
+            guid: 1,
+            x,
+            y,
+            z: 22.0,
+            quat: [1.0, 0.0, 0.0, 0.0],
+            mtable_id: Some(0x09000001),
+            setup_id: Some(0x02000001),
+            model_parts: None,
+            motion_cmd: 0,
+            style: 0,
+            glow: None,
+            scale: 1.0,
+        };
+        // F2: just after crossing into C98D (player frame y = 0.002). The
+        // crier NPC stands in the C98C town 6.2u across the boundary:
+        // world (108.8, 185.8), i.e. C98D-frame (108.8, -6.2).
+        let cam2 = crate::Camera { x: 103.11, y: 0.002, z: 22.0, heading: h };
+        w.set_landblock(0xC98D);
+        let f2 = w
+            .render(0xC98D, &cam2, std::slice::from_ref(&crier(108.8, -6.2)), 80, 24, false, None, false, None)
+            .expect("F2 frame");
+        // F1b: the identical world view (camera world y = 192.002) with
+        // C98C still the center block — isolates any center-vs-neighbor
+        // asymmetry from the crossing itself.
+        let cam1b = crate::Camera { x: 103.11, y: 192.002, z: 22.0, heading: h };
+        w.set_landblock(0xC98C);
+        let f1b = w
+            .render(0xC98C, &cam1b, std::slice::from_ref(&crier(108.8, 185.8)), 80, 24, false, None, false, None)
+            .expect("F1b frame");
+
+        // The town is actually present (guards against a vacuous pass if
+        // the scene failed to load): the 01000827 shop box in the C98C
+        // town renders at this cell in the crossed frame.
+        assert_eq!(f2.cells[18 * 80 + 33], [131, 129, 124], "town static missing from F2");
+
+        // The crier draws in the crossed frame: the same camera rendered
+        // with and without the actor must differ.
+        w.set_landblock(0xC98D);
+        let f2_no = w
+            .render(0xC98D, &cam2, &[], 80, 24, false, None, false, None)
+            .expect("F2 no-crier frame");
+        let crier_cells = f2_no.cells.iter().zip(f2.cells.iter()).filter(|(a, b)| a != b).count();
+        assert!(crier_cells > 0, "crier actor drew nothing in the crossed frame");
+
+        // The grid center must not change the view: the old fixed-color fog
+        // band showed up here as a ~63 u8 horizon rim; the residual
+        // tolerance is the per-triangle flat shading of the fully-fogged
+        // band against the sky gradient (a few u8).
+        let max_d = f2
+            .cells
+            .iter()
+            .zip(f1b.cells.iter())
+            .map(|(a, b)| a[0].abs_diff(b[0]).max(a[1].abs_diff(b[1])).max(a[2].abs_diff(b[2])) as i32)
+            .max()
+            .unwrap_or(0);
+        assert!(max_d <= 16, "horizon pop on block crossing: F2 vs F1b max channel diff {max_d}");
+    }
 }
