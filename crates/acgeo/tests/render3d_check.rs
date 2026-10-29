@@ -13,7 +13,7 @@ fn render3d_shading() {
     // +blah spawns ~12.3E, 28.5S => block-local (12.3, 163.5), landblock 0.
     let (cx, cy) = (12.3f32, 163.5f32);
     w.set_landblock(0);
-    let ground = w.height_at(cx, cy).unwrap_or(0.0);
+    let ground = w.height_at(cx, cy, 0.0).unwrap_or(0.0);
     let cam = Camera { x: cx, y: cy, z: ground + 1.7, heading: 0.0 };
     let frame = w
         .render(0, &cam, &[], 60, 12, false, None, false, None)

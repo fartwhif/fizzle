@@ -76,7 +76,10 @@ pub struct Solid {
 /// keeps the sim's flat-plane behavior.
 pub trait WorldProbe {
     /// Terrain height at block-local `(x, y)` (client frame), or `None`.
-    fn height_at(&mut self, x: f32, y: f32) -> Option<f32>;
+    /// `cur_z` is the caller's current height (the upper-floor lift is
+    /// referenced to it so a first-floor foot does not snap to the second
+    /// floor's ceiling).
+    fn height_at(&mut self, x: f32, y: f32, cur_z: f32) -> Option<f32>;
     /// True when moving the body from `(x0,y0,z0)` to `(x1,y1,z1)` would
     /// intersect a solid (wall, building, closed door). Endpoint `z`s are the
     /// terrain heights at the endpoints (so slopes stay walkable).
@@ -269,10 +272,11 @@ impl World3D {
     /// loading the block's height grid on demand. `None` when the dats have
     /// no terrain for the block. Unlike [`WorldProbe::height_at`] this takes
     /// an explicit landblock, so it can ground entities in neighbouring
-    /// blocks (not just the player's).
+    /// blocks (not just the player's). `cur_z` is the entity's current height
+    /// (the upper-floor lift is referenced to it).
     #[must_use]
-    pub fn terrain_height(&mut self, lb: u32, x: f32, y: f32) -> Option<f32> {
-        self.scene.height_at(lb, x, y)
+    pub fn terrain_height(&mut self, lb: u32, x: f32, y: f32, cur_z: f32) -> Option<f32> {
+        self.scene.height_at(lb, x, y, cur_z)
     }
 
     /// Zoom the 3D camera in (closer) by one wheel notch.
@@ -448,8 +452,8 @@ impl World3D {
 }
 
 impl WorldProbe for World3D {
-    fn height_at(&mut self, x: f32, y: f32) -> Option<f32> {
-        self.scene.height_at(self.cur_lb, x, y)
+    fn height_at(&mut self, x: f32, y: f32, cur_z: f32) -> Option<f32> {
+        self.scene.height_at(self.cur_lb, x, y, cur_z)
     }
 
     fn blocked(&mut self, x0: f32, y0: f32, z0: f32, x1: f32, y1: f32, z1: f32) -> bool {
@@ -545,7 +549,7 @@ mod tests {
         assert!(!world.env_statics.is_empty());
 
         let (px, py) = (12.0f32, 160.0f32);
-        let z0 = world.height_at(px, py).unwrap_or(0.0);
+        let z0 = world.height_at(px, py, 0.0).unwrap_or(0.0);
         // West toward the room's west wall (unwrapped x = 5): blocked.
         assert!(world.blocked(px, py, z0, 4.0, py, z0));
         // North, inside the room: clear.
@@ -577,8 +581,8 @@ mod tests {
         assert!(world.available());
         let lb = 0x3073u32; // (48, 115): hilly terrain, z 36..44
         world.set_landblock(lb);
-        let probe = world.height_at(96.0, 96.0).expect("probe terrain height");
-        let scene = world.scene.height_at(lb, 96.0, 96.0).expect("scene terrain height");
+        let probe = world.height_at(96.0, 96.0, 0.0).expect("probe terrain height");
+        let scene = world.scene.height_at(lb, 96.0, 96.0, 0.0).expect("scene terrain height");
         assert_eq!(probe, scene, "the probe must query the set landblock");
         assert!(probe > 1.0, "hilly block is not flat: {probe}");
     }

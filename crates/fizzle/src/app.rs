@@ -1488,7 +1488,7 @@ impl App {
             return pos;
         };
         let lb = (cell >> 16) & 0xFFFF;
-        let Some(h) = w.terrain_height(lb, pos.x, pos.y) else {
+        let Some(h) = w.terrain_height(lb, pos.x, pos.y, pos.z) else {
             return pos;
         };
         let below = h - pos.z;

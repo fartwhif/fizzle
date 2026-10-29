@@ -1999,7 +1999,7 @@ mod tests {
         };
         let mut w = crate::World3D::new(None);
         w.set_landblock(lb);
-        let z0 = w.height_at(96.0, 96.0).unwrap_or(0.0);
+        let z0 = w.height_at(96.0, 96.0, 0.0).unwrap_or(0.0);
         let cam = Camera {
             x: 96.0,
             y: 96.0,
@@ -2026,7 +2026,7 @@ mod tests {
             for dx in -1i32..=1 {
                 let nbl = landblock_at(bx + dx, by + dy);
                 w.set_landblock(nbl);
-                let has_terrain = w.height_at(96.0, 96.0).is_some();
+                let has_terrain = w.height_at(96.0, 96.0, 0.0).is_some();
                 let held = scene.block_soup(nbl).is_some_and(|s| !s.is_empty());
                 assert!(
                     !has_terrain || held,
@@ -2547,7 +2547,7 @@ mod tests {
         let cam = Camera {
             x: 96.0,
             y: 96.0,
-            z: scene.height_at(lb, 96.0, 96.0).unwrap_or(0.0),
+            z: scene.height_at(lb, 96.0, 96.0, 0.0).unwrap_or(0.0),
             heading: 0.7,
         };
         // The player (a human setup, walk cycle) + a nearby creature.
@@ -2683,7 +2683,7 @@ mod tests {
         let cam = Camera {
             x: 96.0,
             y: 96.0,
-            z: scene.height_at(lb, 96.0, 96.0).unwrap_or(0.0),
+            z: scene.height_at(lb, 96.0, 96.0, 0.0).unwrap_or(0.0),
             heading: 0.7,
         };
         // Same camera + terrain, only the zoom level differs. Stationary

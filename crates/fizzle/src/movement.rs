@@ -385,7 +385,7 @@ impl Movement {
         }
 
         // Terrain following + vertical (the probe's terrain is the ground).
-        if let Some(g) = probe.as_mut().and_then(|p| p.height_at(self.pos.x, self.pos.y)) {
+        if let Some(g) = probe.as_mut().and_then(|p| p.height_at(self.pos.x, self.pos.y, self.pos.z)) {
             self.ground_z = g;
         }
         if held.jump && self.grounded {
@@ -490,23 +490,23 @@ impl Movement {
         let p = probe.as_mut().expect("checked above");
         let (x0, y0, z0) = (self.pos.x, self.pos.y, self.pos.z);
         let (tx, ty) = (x0 + sx, y0 + sy);
-        let gt = p.height_at(tx, ty).unwrap_or(z0);
+        let gt = p.height_at(tx, ty, z0).unwrap_or(z0);
         if !p.blocked(x0, y0, z0, tx, ty, gt) {
             self.pos.x = tx;
             self.pos.y = ty;
         } else {
-            let gx = p.height_at(tx, y0).unwrap_or(z0);
+            let gx = p.height_at(tx, y0, z0).unwrap_or(z0);
             if !p.blocked(x0, y0, z0, tx, y0, gx) {
                 self.pos.x = tx;
             } else {
-                let gy = p.height_at(x0, ty).unwrap_or(z0);
+                let gy = p.height_at(x0, ty, z0).unwrap_or(z0);
                 if !p.blocked(x0, y0, z0, x0, ty, gy) {
                     self.pos.y = ty;
                 }
             }
         }
         if self.grounded {
-            if let Some(g) = p.height_at(self.pos.x, self.pos.y) {
+            if let Some(g) = p.height_at(self.pos.x, self.pos.y, self.pos.z) {
                 self.pos.z = g;
                 self.ground_z = g;
             }
@@ -699,7 +699,7 @@ mod tests {
     }
 
     impl WorldProbe for Fake {
-        fn height_at(&mut self, _x: f32, _y: f32) -> Option<f32> {
+        fn height_at(&mut self, _x: f32, _y: f32, _cur_z: f32) -> Option<f32> {
             None
         }
         fn blocked(&mut self, _x0: f32, _y0: f32, _z0: f32, _x1: f32, _y1: f32, _z1: f32) -> bool {

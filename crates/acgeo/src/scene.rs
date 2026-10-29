@@ -336,8 +336,12 @@ impl Scene {
     /// `None` when the dats are unavailable or the landblock has no terrain
     /// record. Bilinear over the 9x9 vertex grid — the same surface the
     /// renderer rasterizes. x/y are wrapped into the block frame.
+    ///
+    /// `cur_z` is the caller's current height: the upper-floor lift is
+    /// referenced to it (not the terrain) so a foot on the first floor does
+    /// not snap up onto the second floor's ceiling.
     #[must_use]
-    pub fn height_at(&mut self, lb: u32, x: f32, y: f32) -> Option<f32> {
+    pub fn height_at(&mut self, lb: u32, x: f32, y: f32, cur_z: f32) -> Option<f32> {
         if !self.height_grids.contains_key(&lb) {
             let mut grid = None;
             if let (Some(cell), Some(htable)) = (self.cell.as_ref(), self.height_table) {
@@ -381,11 +385,17 @@ impl Scene {
             }
         }
         // A shop's upper floor is a near-flat upward-facing plane in the
-        // building GfxObj mesh (the terrain grid only records the ground).
-        // Lift the foot onto it so the character stands on the second floor
-        // instead of falling through to the ground.
-        if let Some(top) = self.floor_top_at(lb, gx, gy, z) {
-            if (0.2..8.0).contains(&(top - z)) {
+        // building GfxObj mesh or the env-cell physics (the terrain grid only
+        // records the ground). The foot is lifted onto the floor it is
+        // standing on — the one level with the caller's current height
+        // (cur_z) — so the character stands on the second floor instead of
+        // falling through to the ground. A foot a full storey below the next
+        // floor (the first floor) is not level with it, so it is never
+        // lifted up onto the ceiling. The lift only ever raises the foot:
+        // a floor plane buried below the terrain surface (a town's own floor
+        // under its plateau) must not pull the foot down off the ground.
+        if let Some(top) = self.floor_top_at(lb, gx, gy, cur_z) {
+            if top > z {
                 z = top;
             }
         }
@@ -489,13 +499,57 @@ impl Scene {
                     ]);
                 }
             }
+
+            // The shop's interior floor (the env-cell physics) is the walkable
+            // surface where the building mesh's floor is incomplete — the
+            // jeweler's east 2F, for example, has no building-mesh floor but a
+            // full env-cell one. Add its large, near-flat, up-facing triangles.
+            // The area floor keeps the room's furniture (small, isolated tops —
+            // candlesticks, rails — that would otherwise snap the foot) out.
+            // The env-cell tris are 9 floats each (verts, no colour).
+            const FLOOR_MIN_AREA: f32 = 1.0;
+            for solid in self.env_statics(lb) {
+                for o in (0..solid.tris.len()).step_by(9) {
+                    let ax = solid.tris[o];
+                    let ay = solid.tris[o + 1];
+                    let az = solid.tris[o + 2];
+                    let bx = solid.tris[o + 3];
+                    let by = solid.tris[o + 4];
+                    let bz = solid.tris[o + 5];
+                    let cx = solid.tris[o + 6];
+                    let cy = solid.tris[o + 7];
+                    let cz = solid.tris[o + 8];
+                    let zmin = az.min(bz).min(cz);
+                    let zmax = az.max(bz).max(cz);
+                    if zmax - zmin >= 0.3 {
+                        continue;
+                    }
+                    let nz = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+                    if nz <= 0.0 {
+                        continue;
+                    }
+                    let xmin = ax.min(bx).min(cx);
+                    let xmax = ax.max(bx).max(cx);
+                    let ymin = ay.min(by).min(cy);
+                    let ymax = ay.max(by).max(cy);
+                    if (xmax - xmin) * (ymax - ymin) < FLOOR_MIN_AREA {
+                        continue;
+                    }
+                    floors.push([zmax, xmin, ymin, xmax, ymax]);
+                }
+            }
             self.building_floors.insert(lb, floors);
         }
         let mut best: Option<f32> = None;
         if let Some(floors) = self.building_floors.get(&lb) {
             for f in floors {
                 let (ztop, xmin, ymin, xmax, ymax) = (f[0], f[1], f[2], f[3], f[4]);
-                if ztop <= terrain_z + 0.1 {
+                // A floor candidate is one the foot is standing on: its top is
+                // level with the caller's current height (cur_z), not above it.
+                // A foot a full storey below the next floor (the first floor)
+                // is never in this band, so it never snaps up to the ceiling.
+                let dz = ztop - terrain_z;
+                if dz < -0.5 || dz > 0.5 {
                     continue;
                 }
                 // Test the floor and its copies across the block seam, like
@@ -1578,11 +1632,11 @@ mod tests {
         assert!(scene.available());
         let lb = 0x3073u32; // (48, 115)
         // Terrain height: finite, sane range for Dereth.
-        let h = scene.height_at(lb, 96.0, 96.0).expect("terrain height");
+        let h = scene.height_at(lb, 96.0, 96.0, 0.0).expect("terrain height");
         assert!(h.is_finite());
         assert!((0.0..500.0).contains(&h));
         // A second sample is the same surface (bilinear, deterministic).
-        let h2 = scene.height_at(lb, 96.0, 96.0).expect("terrain height again");
+        let h2 = scene.height_at(lb, 96.0, 96.0, 0.0).expect("terrain height again");
         assert!((h - h2).abs() < 1e-4);
         // The terrain soup is 8x8 quads x 2 tris x 12 floats.
         assert!(scene.load_landblock(lb));
@@ -1748,7 +1802,7 @@ mod tests {
         let mut scene = scene;
         assert!(!scene.load_landblock(0));
         assert_eq!(scene.block_soup(0), None);
-        assert_eq!(scene.height_at(0, 10.0, 10.0), None);
+        assert_eq!(scene.height_at(0, 10.0, 10.0, 0.0), None);
         assert!(scene.solids_for_block(0).is_empty());
         assert_eq!(scene.setup_aabb(0x02000001), None);
     }
@@ -1829,5 +1883,34 @@ mod tests {
             .max()
             .unwrap_or(0);
         assert!(max_d <= 16, "horizon pop on block crossing: F2 vs F1b max channel diff {max_d}");
+    }
+
+    /// A shop's second floor must keep a foot that is standing on it, and
+    /// must not lift a foot on the first floor up to the ceiling above.
+    /// Regression: the east 2F of the 01000827 shop lives only in the
+    /// env-cell physics (not the building GfxObj mesh), and the floor lift
+    /// used to reference the terrain, which snapped the first floor up to
+    /// the second. Gated on the retail dats (C98C must actually load).
+    #[test]
+    fn second_floor_lifts_only_when_standing_on_it() {
+        let Some(dir) = dats::find_dat_dir(None) else {
+            eprintln!("skipped: retail dats unavailable");
+            return;
+        };
+        let mut w = crate::World3D::new(Some(&dir));
+        assert!(w.available(), "retail dats present but scene unavailable");
+        let lb = 0xC98C;
+        // East 2F of the jeweler (env-cell-backed floor, z ~25.0). A foot on
+        // the 2F stays on it; a foot on the 1F below does not snap up.
+        let on2f = w.terrain_height(lb, 113.0, 178.0, 25.0).expect("2F height");
+        assert!(
+            (24.5..25.5).contains(&on2f),
+            "2F foot lifted to {on2f}, expected ~25.0"
+        );
+        let on1f = w.terrain_height(lb, 113.0, 178.0, 22.0).expect("1F height");
+        assert!(
+            (21.5..22.5).contains(&on1f),
+            "1F foot lifted to {on1f}, expected ~22.0 (must not snap to the 2F)"
+        );
     }
 }
