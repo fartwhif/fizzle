@@ -26,6 +26,38 @@ pub use acegeom::ACTOR_SCALE;
 /// A world-space axis-aligned box: `[min_x, min_y, min_z, max_x, max_y, max_z]`.
 pub type Aabb = [f32; 6];
 
+/// Transform a model-space [`Aabb`] into world space: rotate its 8 corners
+/// by `quat` (a `[w, x, y, z]` quaternion), translate by `origin`, and take
+/// the axis-aligned bounds of the result. `setup_aabb` returns the
+/// model-space box; this is the world box a door's collision slab is built
+/// from, and is shared by the app (ObjectCreate/Motion) and the tests.
+#[must_use]
+pub fn transform_aabb(aabb: Aabb, origin: [f32; 3], quat: [f32; 4]) -> Aabb {
+    let (w, qx, qy, qz) = (quat[0], quat[1], quat[2], quat[3]);
+    let mut mn = [f32::INFINITY; 3];
+    let mut mx = [f32::NEG_INFINITY; 3];
+    for cx in [aabb[0], aabb[3]] {
+        for cy in [aabb[1], aabb[4]] {
+            for cz in [aabb[2], aabb[5]] {
+                // t = 2 * cross(qv, p); p' = p + w*t + cross(qv, t)
+                let tx = 2.0 * (qy * cz - qz * cy);
+                let ty = 2.0 * (qz * cx - qx * cz);
+                let tz = 2.0 * (qx * cy - qy * cx);
+                let rx = cx + w * tx + (qy * tz - qz * ty) + origin[0];
+                let ry = cy + w * ty + (qz * tx - qx * tz) + origin[1];
+                let rz = cz + w * tz + (qx * ty - qy * tx) + origin[2];
+                mn[0] = mn[0].min(rx);
+                mn[1] = mn[1].min(ry);
+                mn[2] = mn[2].min(rz);
+                mx[0] = mx[0].max(rx);
+                mx[1] = mx[1].max(ry);
+                mx[2] = mx[2].max(rz);
+            }
+        }
+    }
+    [mn[0], mn[1], mn[2], mx[0], mx[1], mx[2]]
+}
+
 /// One static solid in a landblock (the same GfxObjs the 3D view draws):
 /// world-space block-frame triangles (`9` floats per tri: 3 verts) + bbox.
 #[derive(Clone, Debug, Default)]

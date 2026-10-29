@@ -11,7 +11,7 @@ use acproto::messages::{self, combat_mode, Event, GameEvent, Incoming};
 use acproto::motion::{self, soul_emote_body};
 use crate::movement::{approach_step, global_xy, HeldKeys, Movement, TICK};
 use crate::net::{Net, NetEvent};
-use acgeo::{World3D, WorldProbe};
+use acgeo::{transform_aabb, World3D, WorldProbe};
 use crate::themes::Theme;
 use crate::world::{BookPage, BookState, ChatStyle, Combat, ItemState, Target, World, ITEM_TYPE_CREATURE};
 /// Auto-reconnect backoff (Stockpile parity): start 10 s, double per failed
@@ -190,36 +190,6 @@ mod emote_cmd {
     pub const WAVE: u16 = 0x0087;
     pub const CHEER: u16 = 0x004C;
     pub const CRY: u16 = 0x007F;
-}
-
-/// Rotate a model-space AABB's 8 corners by the quaternion, translate by the
-/// world origin, and re-bound: the world-space collision slab `World3D`
-/// expects (its `setup_aabb` returns the model-space box).
-#[must_use]
-fn transform_aabb(aabb: [f32; 6], origin: [f32; 3], quat: [f32; 4]) -> [f32; 6] {
-    let (w, qx, qy, qz) = (quat[0], quat[1], quat[2], quat[3]);
-    let mut mn = [f32::INFINITY; 3];
-    let mut mx = [f32::NEG_INFINITY; 3];
-    for cx in [aabb[0], aabb[3]] {
-        for cy in [aabb[1], aabb[4]] {
-            for cz in [aabb[2], aabb[5]] {
-                // t = 2 * cross(qv, p); p' = p + w*t + cross(qv, t)
-                let tx = 2.0 * (qy * cz - qz * cy);
-                let ty = 2.0 * (qz * cx - qx * cz);
-                let tz = 2.0 * (qx * cy - qy * cx);
-                let rx = cx + w * tx + (qy * tz - qz * ty) + origin[0];
-                let ry = cy + w * ty + (qz * tx - qx * tz) + origin[1];
-                let rz = cz + w * tz + (qx * ty - qy * tx) + origin[2];
-                mn[0] = mn[0].min(rx);
-                mn[1] = mn[1].min(ry);
-                mn[2] = mn[2].min(rz);
-                mx[0] = mx[0].max(rx);
-                mx[1] = mx[1].max(ry);
-                mx[2] = mx[2].max(rz);
-            }
-        }
-    }
-    [mn[0], mn[1], mn[2], mx[0], mx[1], mx[2]]
 }
 
 /// The full application.
@@ -766,9 +736,12 @@ impl App {
                     self.world.container.items.retain(|i| i.guid != o.guid);
                     self.world.container.items.push(filled);
                 }
-                // Register a door's collision slab with the 3D world; a
-                // closed door blocks the movement sim, an open one does not.
-                if o.item_type == crate::world::ITEM_TYPE_DOOR {
+                // Register a swingable door's collision slab with the 3D
+                // world; a closed door blocks the movement sim, an open one
+                // does not. A sign or other static Door-typed entity has no
+                // motion table, so it is drawn as its model and never gets a
+                // slab (retail shows no slab for the Rithwic sign).
+                if o.item_type == crate::world::ITEM_TYPE_DOOR && o.mtable_id.is_some() {
                     if let Some(w) = self.world3d.as_mut() {
                         let model_aabb = o.setup_id.and_then(|s| w.setup_aabb(s));
                         let block = position.map(|p| (p.0 >> 16) & 0xFFFF).unwrap_or(0);
@@ -950,26 +923,34 @@ impl App {
                         crate::world::DOOR_MOTION_OFF
                     };
                 }
-                if let Some(w) = self.world3d.as_mut() {
-                    let (setup, origin, rot, block) = self
-                        .world
-                        .entities
-                        .get(&m.guid)
-                        .map_or((None, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], 0u32), |e| {
-                            (e.setup_id, [e.pos.x, e.pos.y, e.pos.z], e.rot, e.block())
-                        });
-                    let aabb = setup
-                        .and_then(|s| w.setup_aabb(s))
-                        .map(|m| {
-                            let mut aabb = transform_aabb(m, origin, rot);
-                            // Ground the slab on the door's world z (the ObjectCreate
-                            // and Motion paths must agree).
-                            let dz = origin[2] - aabb[2];
-                            aabb[2] += dz;
-                            aabb[5] += dz;
-                            aabb
-                        });
-                    w.set_door(m.guid, aabb, open, block);
+                // Only swingable doors (a motion table) carry a slab; a sign
+                // must never gain one from a motion, even if one arrives.
+                if let Some(e) = self
+                    .world
+                    .entities
+                    .get(&m.guid)
+                    .filter(|e| e.mtable_id.is_some())
+                {
+                    let (setup, origin, rot, block) = (
+                        e.setup_id,
+                        [e.pos.x, e.pos.y, e.pos.z],
+                        e.rot,
+                        e.block(),
+                    );
+                    if let Some(w) = self.world3d.as_mut() {
+                        let aabb = setup
+                            .and_then(|s| w.setup_aabb(s))
+                            .map(|m| {
+                                let mut aabb = transform_aabb(m, origin, rot);
+                                // Ground the slab on the door's world z (the
+                                // ObjectCreate and Motion paths must agree).
+                                let dz = origin[2] - aabb[2];
+                                aabb[2] += dz;
+                                aabb[5] += dz;
+                                aabb
+                            });
+                        w.set_door(m.guid, aabb, open, block);
+                    }
                 }
             }
             Incoming::PlayerKilled { message, victim, killer } => {
