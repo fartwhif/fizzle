@@ -119,6 +119,14 @@ pub struct Scene {
     /// stabs). Triangles/bbox in the env cell's unwrapped placement frame;
     /// the collision/occlusion paths test periodic copies. Cached.
     env_solid_objs: HashMap<u32, Vec<Solid>>,
+    /// Env-cell *room skin* per landblock: each cell's physics polygons
+    /// fan-triangulated and transformed by the EnvCell placement frame, with
+    /// the doorway/window orifices (the 0xff portal planes) carved out. This
+    /// is the interior of a building (walls, floors, ceilings) — the same
+    /// geometry collision uses (a town's walls exist only here) and what the
+    /// renderer draws as the room. Separate from the `env_props` furniture so
+    /// the room can be rendered without re-drawing the props. Cached.
+    env_skin_objs: HashMap<u32, Vec<Solid>>,
     // Per-id caches for the dynamic (animated) actors.
     setup_parts_cache: HashMap<u32, Option<Vec<u32>>>,
     mtable_cache: HashMap<u32, Option<MotionTable>>,
@@ -169,6 +177,7 @@ impl Scene {
             building_floors: HashMap::new(),
             env_prop_soups: HashMap::new(),
             env_solid_objs: HashMap::new(),
+            env_skin_objs: HashMap::new(),
             setup_parts_cache: HashMap::new(),
             mtable_cache: HashMap::new(),
             anim_cache: HashMap::new(),
@@ -1293,15 +1302,19 @@ impl Scene {
         soups
     }
 
-    /// The env (indoor/structure) cell physics solids for landblock `lb`:
-    /// the walls that block movement. A town's walls exist only here (its
-    /// LBI has no stabs). Each env cell's physics polygons are fanned and
-    /// transformed by the EnvCell position frame (unwrapped — the frame can
-    /// sit outside the `[0, 192)` block frame). Cached per landblock; empty
-    /// when the dats are unavailable or no env cell carries physics.
+    /// The env-cell *room skin* for landblock `lb`: each cell's physics
+    /// polygons fan-triangulated and transformed by the EnvCell position frame
+    /// (unwrapped — the frame can sit outside the `[0, 192)` block frame), with
+    /// the doorway/window orifices (the 0xff portal planes) carved out. This is
+    /// the interior of a building (walls, floors, ceilings) — the same geometry
+    /// collision uses (a town's walls exist only here) and what the renderer
+    /// draws as the room. The interior `env_props` furniture is NOT included
+    /// (it is a separate `Solid` set the renderer draws with the detailed prop
+    /// meshes). Cached; empty when the dats are unavailable or no env cell
+    /// carries physics.
     #[must_use]
-    pub fn env_statics(&mut self, lb: u32) -> Vec<Solid> {
-        if let Some(v) = self.env_solid_objs.get(&lb) {
+    pub fn env_skin(&mut self, lb: u32) -> Vec<Solid> {
+        if let Some(v) = self.env_skin_objs.get(&lb) {
             return v.clone();
         }
         let mut out: Vec<Solid> = Vec::new();
@@ -1445,6 +1458,20 @@ impl Scene {
                 out.push(Solid { tris, bbox, building: false });
             }
         }
+        self.env_skin_objs.insert(lb, out.clone());
+        out
+    }
+
+    /// The env (indoor/structure) cell physics solids for landblock `lb`: the
+    /// room skin (walls/floors/ceilings) plus the interior furniture. A town's
+    /// walls exist only here (its LBI has no stabs). Cached per landblock;
+    /// empty when the dats are unavailable or no env cell carries physics.
+    #[must_use]
+    pub fn env_statics(&mut self, lb: u32) -> Vec<Solid> {
+        if let Some(v) = self.env_solid_objs.get(&lb) {
+            return v.clone();
+        }
+        let mut out = self.env_skin(lb);
         // The env-cell statics (the shop's interior props — fences, stairs,
         // candlesticks, paintings, barrels) also block movement. Reuse the
         // rendered prop soup: each tri's first 9 floats are the world-space

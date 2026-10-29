@@ -915,56 +915,49 @@ fn raster_env_cell(
     }
 }
 
-/// Rasterize the upward-facing, near-flat floor tris of the env-cell physics
-/// (`env_statics`) — the shop's interior floor where the building GfxObj mesh
-/// has no floor of its own. A shop's second floor (the jeweler's 2F, for
-/// example) is carried entirely by the env-cell physics: it is walkable but,
-/// drawn nowhere, invisible — a walk of faith. This pass draws those floor
-/// tris so the surface under the character's feet is visible. The harvest
-/// test is the same as `Scene::floor_top_at` (near-flat, up-facing, area
-/// `>= FLOOR_MIN_AREA`) so the rendered floor matches the walkable one; small
-/// tops (candlesticks, rails) stay out. Both windings, like the other
-/// env/static passes.
-fn raster_env_floors(
+/// Rasterize the env-cell room skin — the building's interior (walls, floors,
+/// ceilings) taken from the CellStruct physics polygons with the
+/// doorway/window orifices carved out. This is the same geometry collision
+/// uses (a town's walls exist only here), and retail draws it as the room; a
+/// shop's second floor (the jeweler's 2F, for example) is carried entirely by
+/// this skin, so drawing it — not just its up-facing floor tris — is what
+/// makes the upper room visible.
+///
+/// The skin is the *interior*, so it is drawn only while the camera is inside
+/// the building — i.e. inside *any* of the cell regions. The mirror of the
+/// env-cell shell (skipped when the camera is inside so it doesn't wall the
+/// room in). From outside, the interior is not visible — and drawing it for
+/// the center block but not a neighbor would pop the view at a landblock
+/// crossing. When the camera is inside, the whole interior (every cell's
+/// walls/floor/ceiling) is drawn, not just the cell the camera stands in.
+fn raster_env_skin(
     cells: &mut [[u8; 3]],
     depth: &mut [f32],
     b: &Basis,
     cols: usize,
     rows: usize,
-    env_statics: &[Solid],
+    skin: &[Solid],
     light: (f32, f32, f32),
     fog_span: f32,
     ox: f32,
     oy: f32,
 ) {
-    const FLOOR_MIN_AREA: f32 = 1.0;
-    for s in env_statics {
+    let (cx, cy, cz) = (b.cam[0], b.cam[1], b.cam[2]);
+    // Draw the whole interior only while the camera is inside the building.
+    let inside = skin.iter().any(|s| {
+        let r = s.bbox;
+        cx >= r[0] && cx <= r[3] && cy >= r[1] && cy <= r[4] && cz >= r[2] && cz <= r[5]
+    });
+    if !inside {
+        return;
+    }
+    for s in skin {
         let tris = &s.tris;
         let n = tris.len() / 9 * 9;
         for i in (0..n).step_by(9) {
-            let (ax, ay, az) = (tris[i], tris[i + 1], tris[i + 2]);
-            let (bx, by, bz) = (tris[i + 3], tris[i + 4], tris[i + 5]);
-            let (cx, cy, cz) = (tris[i + 6], tris[i + 7], tris[i + 8]);
-            let zmin = az.min(bz).min(cz);
-            let zmax = az.max(bz).max(cz);
-            if zmax - zmin >= 0.3 {
-                continue;
-            }
-            // Normal z-component of (B-A)x(C-A); >0 faces up.
-            let nz = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-            if nz <= 0.0 {
-                continue;
-            }
-            let xmin = ax.min(bx).min(cx);
-            let xmax = ax.max(bx).max(cx);
-            let ymin = ay.min(by).min(cy);
-            let ymax = ay.max(by).max(cy);
-            if (xmax - xmin) * (ymax - ymin) < FLOOR_MIN_AREA {
-                continue;
-            }
-            let a = (ax + ox, ay + oy, az);
-            let bb = (bx + ox, by + oy, bz);
-            let c = (cx + ox, cy + oy, cz);
+            let a = (tris[i] + ox, tris[i + 1] + oy, tris[i + 2]);
+            let bb = (tris[i + 3] + ox, tris[i + 4] + oy, tris[i + 5]);
+            let c = (tris[i + 6] + ox, tris[i + 7] + oy, tris[i + 8]);
             raster_tri(cells, depth, b, cols, rows, a, bb, c, STATIC_COLOR, light, fog_span);
             raster_tri(cells, depth, b, cols, rows, bb, a, c, STATIC_COLOR, light, fog_span);
         }
@@ -1683,6 +1676,7 @@ pub(crate) fn render_frame(
     zoom: &mut Zoom,
     anim: &mut HashMap<u32, AnimClock>,
     env_statics: &[Solid],
+    env_skin: &[Solid],
     neighborhood: &Neighborhood,
     doors: &mut HashMap<u32, Door>,
     lb: u32,
@@ -1864,19 +1858,21 @@ pub(crate) fn render_frame(
             raster_env_cell(&mut cells, &mut depth, &basis, cols, rows, s, light, fog_span, ox, oy, rx, ry);
         }
     }
-    // The env-cell physics floor (the shop's interior floor the building
-    // GfxObj mesh has no floor of its own — the jeweler's 2F, for example).
-    // It is walkable but drawn nowhere, so draw its up-facing near-flat floor
-    // tris here: after the env-cell shell (which may have the 1F floor) and
-    // before the props/building mesh so furniture sits on top of it. The
-    // `env_statics` is the current block only (block-local frame, offset 0).
-    raster_env_floors(
+    // The env-cell room skin (the shop's interior — walls, floors, ceilings —
+    // the same geometry collision uses). Retail draws it as the room; a
+    // shop's second floor (the jeweler's 2F, for example) is carried entirely
+    // by this skin, so drawing it — not just its up-facing floor tris — is
+    // what makes the upper room visible. Drawn after the env-cell shell (which
+    // may have the 1F floor) and before the props/building mesh so furniture
+    // sits on top. The skin is the current block only (block-local frame,
+    // offset 0).
+    raster_env_skin(
         &mut cells,
         &mut depth,
         &basis,
         cols,
         rows,
-        env_statics,
+        env_skin,
         light,
         fog_span,
         0.0,
@@ -2084,7 +2080,7 @@ mod tests {
         let mut anim = HashMap::new();
         let mut doors = HashMap::new();
         let _frame = render_frame(
-            &mut scene, &mut zoom, &mut anim, &[], &std::array::from_fn(|_| BlockGeom::default()), &mut doors,
+            &mut scene, &mut zoom, &mut anim, &[], &[], &std::array::from_fn(|_| BlockGeom::default()), &mut doors,
             lb, &cam, &[], 80, 24, false, None, false, None,
         ).expect("frame for a terrain landblock");
 
@@ -2161,7 +2157,7 @@ mod tests {
         nb[4].statics = vec![wall.clone()];
         nb[4].env = env_soup.clone();
         let frame = render_frame(
-            &mut scene, &mut Zoom::new(), &mut anim, &[], &nb, &mut doors,
+            &mut scene, &mut Zoom::new(), &mut anim, &[], &[], &nb, &mut doors,
             0, &cam, &[self_actor.clone()], 80, 24, false, None, false, Some(1),
         ).expect("frame in the cramped room");
         assert!(frame.first_person, "a wall 6u behind the player must force first-person");
@@ -2170,7 +2166,7 @@ mod tests {
         let mut nb2 = std::array::from_fn(|_| BlockGeom::default());
         nb2[4].env = env_soup;
         let frame2 = render_frame(
-            &mut scene, &mut Zoom::new(), &mut anim, &[], &nb2, &mut doors,
+            &mut scene, &mut Zoom::new(), &mut anim, &[], &[], &nb2, &mut doors,
             0, &cam, &[self_actor.clone()], 80, 24, false, None, false, Some(1),
         ).expect("frame in open space");
         assert!(!frame2.first_person, "no wall → the follow camera is kept");
@@ -2320,6 +2316,7 @@ mod tests {
             &mut zoom,
             &mut anim,
             &[],
+            &[],
             &nb,
             &mut doors,
             0,
@@ -2407,7 +2404,7 @@ mod tests {
         nb[7].statics.push(prop.clone());
         let cam = Camera { x: 96.0, y: 191.8, z: 0.0, heading: 0.0 };
         let frame = render_frame(
-            &mut scene, &mut Zoom::new(), &mut anim, &[], &nb, &mut doors,
+            &mut scene, &mut Zoom::new(), &mut anim, &[], &[], &nb, &mut doors,
             0, &cam, &[], 80, 24, false, None, false, None,
         )
         .expect("frame just inside the south block");
@@ -2419,7 +2416,7 @@ mod tests {
         nb2[4].statics.push(prop);
         let cam = Camera { x: 96.0, y: 0.2, z: 0.0, heading: 0.0 };
         let frame = render_frame(
-            &mut scene, &mut Zoom::new(), &mut anim, &[], &nb2, &mut doors,
+            &mut scene, &mut Zoom::new(), &mut anim, &[], &[], &nb2, &mut doors,
             0, &cam, &[], 80, 24, false, None, false, None,
         )
         .expect("frame just inside the north block");
@@ -2674,6 +2671,7 @@ mod tests {
             &mut zoom,
             &mut anim,
             &[],
+            &[],
             &nb,
             &mut doors,
             lb,
@@ -2704,6 +2702,7 @@ mod tests {
             &mut scene,
             &mut zoom,
             &mut anim,
+            &[],
             &[],
             &nb,
             &mut doors,
@@ -2769,6 +2768,7 @@ mod tests {
                 zoom,
                 &mut anim,
                 &[],
+                &[],
                 &nb,
                 &mut doors,
                 lb,
@@ -2818,6 +2818,7 @@ mod tests {
             &mut zoom,
             &mut anim,
             &[],
+            &[],
             &std::array::from_fn(|_| BlockGeom::default()),
             &mut HashMap::new(),
             0,
@@ -2838,6 +2839,7 @@ mod tests {
                 &mut scene,
                 &mut zoom,
                 &mut anim,
+                &[],
                 &[],
                 &std::array::from_fn(|_| BlockGeom::default()),
                 &mut HashMap::new(),

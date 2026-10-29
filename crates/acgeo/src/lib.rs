@@ -231,6 +231,11 @@ pub struct World3D {
     /// landblock — a town's walls (its LBI has no stabs). Collision-only
     /// (the renderer draws the env soup); re-based on a landblock change.
     env_statics: Vec<Solid>,
+    /// The env-cell room skin for the current landblock (the building
+    /// interior — walls/floors/ceilings, the same geometry as the skin part of
+    /// `env_statics` minus the furniture). Drawn as the room by the renderer;
+    /// re-based on a landblock change.
+    env_skin: Vec<Solid>,
     /// The 3×3 landblock geometry grid centered on the current block
     /// (index 4 = current). Fetched in `set_landblock`, drawn in `render`:
     /// buildings/props in a neighbor block stay visible until the fog takes
@@ -255,6 +260,7 @@ impl World3D {
             cur_lb: 0,
             statics: Vec::new(),
             env_statics: Vec::new(),
+            env_skin: Vec::new(),
             neighbors: std::array::from_fn(|_| render::BlockGeom::default()),
             zoom: render::Zoom::new(),
             anim: std::collections::HashMap::new(),
@@ -346,6 +352,7 @@ impl World3D {
         self.cur_lb = lb;
         self.statics = self.scene.solids_for_block(lb);
         self.env_statics = self.scene.env_statics(lb);
+        self.env_skin = self.scene.env_skin(lb);
         // Fetch the 3×3 geometry grid around the player's block (cheap when
         // the blocks are already scene-cached: one LRU lookup each).
         let bx = ((lb >> 8) & 0xFF) as i32;
@@ -434,6 +441,7 @@ impl World3D {
             &mut self.zoom,
             &mut self.anim,
             &self.env_statics,
+            &self.env_skin,
             &self.neighbors,
             &mut self.doors,
             lb,
