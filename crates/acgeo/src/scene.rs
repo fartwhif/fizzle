@@ -1219,11 +1219,15 @@ impl Scene {
                 //    flat grey slab (the env-cell's orifice surface carries a
                 //    0xff solid color, so the no-color/no-texture and 0xff
                 //    rules below would otherwise miss it), and
-                //  - a solid/texture-avg color carrying the 0xff top byte
-                //    (case 1: solid 0xff filler; case 3: texture with a
-                //    resolved average — in 0x8502 these floor/ceiling planes
-                //    blanket the frame, so HEAD's blanket 0xff skip is
-                //    required for the town test), and
+                //  - a surface whose *direct* color is the solid 0xff filler
+                //    (the invisible marker in the AC data). This must key on
+                //    `surf.color`, NOT the resolved color: a texture's resolved
+                //    average always carries the 0xff opaque alpha (see
+                //    `parse_texture_average` / `average_paletted`), so testing
+                //    the resolved color drops every textured wall/floor/ceiling
+                //    (the whole room vanishes — the 2F floors of the shops in
+                //    0xC98C) while still passing the 0x8502 town test, whose
+                //    filler planes are direct-0xff, and
                 //  - a surface with neither a color nor a texture (the flat
                 //    plane that otherwise covers a doorway orifice as a grey
                 //    slab).
@@ -1245,7 +1249,7 @@ impl Scene {
                 if surf.is_some_and(|s| s.color.is_none() && s.texture_id.is_none()) {
                     continue;
                 }
-                if surf_color.is_some_and(|c| (c >> 24) == 0xff) {
+                if surf.is_some_and(|s| s.color.is_some_and(|c| (c >> 24) == 0xff)) {
                     continue;
                 }
                 let color = surf_color.map(mat_color).unwrap_or([96.0, 96.0, 96.0]);
@@ -1459,6 +1463,36 @@ impl Scene {
             }
         }
         self.env_skin_objs.insert(lb, out.clone());
+        out
+    }
+
+    /// The env-cell *room* for landblock `lb`: the interior walls/floors/
+    /// ceilings as drawn by retail — the CellStruct's **drawing** polygons
+    /// (the `num_polygons` set, not the physics set), fanned, transformed by
+    /// the EnvCell position frame, and colored per surface. This is exactly
+    /// what retail's `DrawEnvCell` renders (`Render::PolyNext->poly =
+    /// &structure->polygons[i]` for `i < num_polygons`), so a shop's second
+    /// floor and the doorway/window openings come out as authored instead of
+    /// being approximated from the coarser collision geometry. The invisible
+    /// surfaces (glass, the 0xff orifice planes, and no-color/no-texture) are
+    /// dropped, which is what leaves the doorway and window openings open.
+    /// Reuses the [`Scene::env_soup`] cache; empty when the dats are
+    /// unavailable or the block has no env cells.
+    #[must_use]
+    pub fn env_room(&mut self, lb: u32) -> Vec<Solid> {
+        let mut out: Vec<Solid> = Vec::new();
+        for (_id, region, soup) in self.env_soup(lb) {
+            if soup.is_empty() {
+                continue;
+            }
+            let mut tris = Vec::with_capacity(soup.len() / 12 * 9);
+            for i in (0..soup.len()).step_by(12) {
+                tris.extend_from_slice(&soup[i..i + 9]);
+            }
+            if !tris.is_empty() {
+                out.push(Solid { tris, bbox: region, building: false });
+            }
+        }
         out
     }
 

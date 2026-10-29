@@ -915,13 +915,14 @@ fn raster_env_cell(
     }
 }
 
-/// Rasterize the env-cell room skin — the building's interior (walls, floors,
-/// ceilings) taken from the CellStruct physics polygons with the
-/// doorway/window orifices carved out. This is the same geometry collision
-/// uses (a town's walls exist only here), and retail draws it as the room; a
-/// shop's second floor (the jeweler's 2F, for example) is carried entirely by
-/// this skin, so drawing it — not just its up-facing floor tris — is what
-/// makes the upper room visible.
+/// Rasterize the env-cell room — the building's interior (walls, floors,
+/// ceilings) as retail draws it: the CellStruct **drawing** polygons with the
+/// invisible orifice/glass surfaces dropped (so the doorway and window
+/// openings stay open). This is the same interior collision uses the physics
+/// skin for, but the drawing set is what retail renders — a shop's second
+/// floor (the jeweler's 2F, for example) and the floor panels between the
+/// walls come out as authored rather than approximated from the coarser
+/// collision geometry.
 ///
 /// The skin is the *interior*, so it is drawn only while the camera is inside
 /// the building — i.e. inside *any* of the cell regions. The mirror of the

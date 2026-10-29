@@ -231,9 +231,10 @@ pub struct World3D {
     /// landblock — a town's walls (its LBI has no stabs). Collision-only
     /// (the renderer draws the env soup); re-based on a landblock change.
     env_statics: Vec<Solid>,
-    /// The env-cell room skin for the current landblock (the building
-    /// interior — walls/floors/ceilings, the same geometry as the skin part of
-    /// `env_statics` minus the furniture). Drawn as the room by the renderer;
+    /// The env-cell room for the current landblock (the building interior —
+    /// walls/floors/ceilings) as retail draws it: the CellStruct **drawing**
+    /// polygons (the `env_room` source), not the coarser physics skin that
+    /// collision uses (`env_statics`). Drawn as the room by the renderer;
     /// re-based on a landblock change.
     env_skin: Vec<Solid>,
     /// The 3×3 landblock geometry grid centered on the current block
@@ -352,7 +353,7 @@ impl World3D {
         self.cur_lb = lb;
         self.statics = self.scene.solids_for_block(lb);
         self.env_statics = self.scene.env_statics(lb);
-        self.env_skin = self.scene.env_skin(lb);
+        self.env_skin = self.scene.env_room(lb);
         // Fetch the 3×3 geometry grid around the player's block (cheap when
         // the blocks are already scene-cached: one LRU lookup each).
         let bx = ((lb >> 8) & 0xFF) as i32;
