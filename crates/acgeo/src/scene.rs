@@ -509,15 +509,25 @@ impl Scene {
                 }
             }
 
-            // The shop's interior floor (the env-cell physics) is the walkable
-            // surface where the building mesh's floor is incomplete — the
-            // jeweler's east 2F, for example, has no building-mesh floor but a
-            // full env-cell one. Add its large, near-flat, up-facing triangles.
-            // The area floor keeps the room's furniture (small, isolated tops —
-            // candlesticks, rails — that would otherwise snap the foot) out.
-            // The env-cell tris are 9 floats each (verts, no colour).
+            // The shop's interior floor is the walkable surface where the
+            // building mesh's floor is incomplete — the jeweler's east 2F, for
+            // example, has no building-mesh floor but a full env-cell one. Add
+            // its large, near-flat, up-facing triangles. The area floor keeps
+            // the room's furniture (small, isolated tops — candlesticks, rails
+            // — that would otherwise snap the foot) out. The env-cell tris are
+            // 9 floats each (verts, no colour).
+            //
+            // Both the physics skin (collision) AND the drawing room (what
+            // retail renders) contribute: the physics set is sparse — a shop's
+            // 2F floor exists only over part of the room, so a foot near the
+            // wall/floor seam found no candidate and dropped to the floor below
+            // (the 2F->1F teleport). The drawing set carries the floor across
+            // the whole room, so it gives the foot the real authored surface to
+            // catch on. This is a walk-surface lift (it snaps the foot UP to a
+            // floor level), not a collision, so the richer drawing set is the
+            // right source.
             const FLOOR_MIN_AREA: f32 = 1.0;
-            for solid in self.env_statics(lb) {
+            let add_floor_candidates = |floors: &mut Vec<[f32; 5]>, solid: &Solid| {
                 for o in (0..solid.tris.len()).step_by(9) {
                     let ax = solid.tris[o];
                     let ay = solid.tris[o + 1];
@@ -546,6 +556,9 @@ impl Scene {
                     }
                     floors.push([zmax, xmin, ymin, xmax, ymax]);
                 }
+            };
+            for solid in self.env_statics(lb).into_iter().chain(self.env_room(lb)) {
+                add_floor_candidates(&mut floors, &solid);
             }
             self.building_floors.insert(lb, floors);
         }
