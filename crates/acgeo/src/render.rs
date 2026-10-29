@@ -915,6 +915,62 @@ fn raster_env_cell(
     }
 }
 
+/// Rasterize the upward-facing, near-flat floor tris of the env-cell physics
+/// (`env_statics`) — the shop's interior floor where the building GfxObj mesh
+/// has no floor of its own. A shop's second floor (the jeweler's 2F, for
+/// example) is carried entirely by the env-cell physics: it is walkable but,
+/// drawn nowhere, invisible — a walk of faith. This pass draws those floor
+/// tris so the surface under the character's feet is visible. The harvest
+/// test is the same as `Scene::floor_top_at` (near-flat, up-facing, area
+/// `>= FLOOR_MIN_AREA`) so the rendered floor matches the walkable one; small
+/// tops (candlesticks, rails) stay out. Both windings, like the other
+/// env/static passes.
+fn raster_env_floors(
+    cells: &mut [[u8; 3]],
+    depth: &mut [f32],
+    b: &Basis,
+    cols: usize,
+    rows: usize,
+    env_statics: &[Solid],
+    light: (f32, f32, f32),
+    fog_span: f32,
+    ox: f32,
+    oy: f32,
+) {
+    const FLOOR_MIN_AREA: f32 = 1.0;
+    for s in env_statics {
+        let tris = &s.tris;
+        let n = tris.len() / 9 * 9;
+        for i in (0..n).step_by(9) {
+            let (ax, ay, az) = (tris[i], tris[i + 1], tris[i + 2]);
+            let (bx, by, bz) = (tris[i + 3], tris[i + 4], tris[i + 5]);
+            let (cx, cy, cz) = (tris[i + 6], tris[i + 7], tris[i + 8]);
+            let zmin = az.min(bz).min(cz);
+            let zmax = az.max(bz).max(cz);
+            if zmax - zmin >= 0.3 {
+                continue;
+            }
+            // Normal z-component of (B-A)x(C-A); >0 faces up.
+            let nz = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+            if nz <= 0.0 {
+                continue;
+            }
+            let xmin = ax.min(bx).min(cx);
+            let xmax = ax.max(bx).max(cx);
+            let ymin = ay.min(by).min(cy);
+            let ymax = ay.max(by).max(cy);
+            if (xmax - xmin) * (ymax - ymin) < FLOOR_MIN_AREA {
+                continue;
+            }
+            let a = (ax + ox, ay + oy, az);
+            let bb = (bx + ox, by + oy, bz);
+            let c = (cx + ox, cy + oy, cz);
+            raster_tri(cells, depth, b, cols, rows, a, bb, c, STATIC_COLOR, light, fog_span);
+            raster_tri(cells, depth, b, cols, rows, bb, a, c, STATIC_COLOR, light, fog_span);
+        }
+    }
+}
+
 /// Rasterize one GfxObj mesh soup (12 floats/tri: 3 verts + rgb) — a placed
 /// prop / building mesh in its block's frame, offset into the periodic 192u
 /// frame by `(ox, oy)`. NO toroidal wrap (see [`raster_statics`]): a
@@ -1808,6 +1864,24 @@ pub(crate) fn render_frame(
             raster_env_cell(&mut cells, &mut depth, &basis, cols, rows, s, light, fog_span, ox, oy, rx, ry);
         }
     }
+    // The env-cell physics floor (the shop's interior floor the building
+    // GfxObj mesh has no floor of its own — the jeweler's 2F, for example).
+    // It is walkable but drawn nowhere, so draw its up-facing near-flat floor
+    // tris here: after the env-cell shell (which may have the 1F floor) and
+    // before the props/building mesh so furniture sits on top of it. The
+    // `env_statics` is the current block only (block-local frame, offset 0).
+    raster_env_floors(
+        &mut cells,
+        &mut depth,
+        &basis,
+        cols,
+        rows,
+        env_statics,
+        light,
+        fog_span,
+        0.0,
+        0.0,
+    );
     // Placed GfxObj props (furniture/barrels/lamps): the full visual mesh,
     // drawn after the env cells so interior props sit on top of the room. A
     // prop is always drawn (unlike the env shell, which is skipped when the
