@@ -486,6 +486,13 @@ impl Scene {
     /// that is near-flat (own z-range < 0.3) and faces up (positive z
     /// normal) is a floor candidate; vertical walls and ceilings never are.
     fn floor_top_at(&mut self, lb: u32, gx: f32, gy: f32, terrain_z: f32) -> Option<f32> {
+        // Adjacent floor triangles meet edge-to-edge, so a foot on the seam
+        // between two of them is outside both bboxes and drops through (a
+        // point-gap crack in an upper-floor band). Widen each candidate's
+        // bbox by this much so neighbouring tops overlap and the seam has no
+        // gap. The dz band guard below still stops a foot a storey away from
+        // snapping up, so the extra reach never lifts the foot off its floor.
+        const FLOOR_SEAM_GAP: f32 = 0.5;
         if !self.building_floors.contains_key(&lb) {
             // Steeper than this and the face is a wall, not a walkable ramp:
             // |horizontal normal| / up-normal = tan of the slope from level.
@@ -604,13 +611,14 @@ impl Scene {
                     continue;
                 }
                 // Test the floor and its copies across the block seam, like
-                // the periodic `ray_blocked`.
+                // the periodic `ray_blocked`; widen by FLOOR_SEAM_GAP so the
+                // foot on the seam between two adjacent tops is still caught.
                 for dx in [0.0f32, BLOCK_LEN, -BLOCK_LEN] {
                     for dy in [0.0f32, BLOCK_LEN, -BLOCK_LEN] {
-                        if xmin + dx <= gx
-                            && gx <= xmax + dx
-                            && ymin + dy <= gy
-                            && gy <= ymax + dy
+                        if xmin + dx - FLOOR_SEAM_GAP <= gx
+                            && gx <= xmax + dx + FLOOR_SEAM_GAP
+                            && ymin + dy - FLOOR_SEAM_GAP <= gy
+                            && gy <= ymax + dy + FLOOR_SEAM_GAP
                         {
                             best = Some(best.map_or(ztop, |b| b.max(ztop)));
                         }
