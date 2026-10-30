@@ -108,6 +108,15 @@ pub struct Scene {
     /// stands on an upper floor instead of falling through to the ground.
     /// Cached.
     building_floors: HashMap<u32, Vec<[f32; 5]>>,
+    /// Upward-facing *walkable-sloped* surfaces (ramps) derived from the
+    /// building GfxObj meshes per landblock: one 3-vertex triangle per ramp
+    /// face. These are the sloped walkways (e.g. the ramp up to a shop) that
+    /// the near-flat floor filter (`building_floors`) drops, so a foot over
+    /// them would otherwise ground on the ramp's underside (the terrain
+    /// height) and the knee ray would clip the ramp top. [`Scene::height_at`]
+    /// grounds the foot on the interpolated surface z so the character
+    /// stands on the ramp. Cached.
+    building_ramps: HashMap<u32, Vec<[f32; 9]>>,
     /// GfxObj (0x01) statics placed inside the env (indoor) cells per
     /// landblock — the shop's interior props (stairs, candlesticks,
     /// paintings). 12 floats/tri (3 world-space verts + rgb). The env-cell
@@ -175,6 +184,7 @@ impl Scene {
             prop_soups: HashMap::new(),
             building_soups: HashMap::new(),
             building_floors: HashMap::new(),
+            building_ramps: HashMap::new(),
             env_prop_soups: HashMap::new(),
             env_solid_objs: HashMap::new(),
             env_skin_objs: HashMap::new(),
@@ -477,7 +487,11 @@ impl Scene {
     /// normal) is a floor candidate; vertical walls and ceilings never are.
     fn floor_top_at(&mut self, lb: u32, gx: f32, gy: f32, terrain_z: f32) -> Option<f32> {
         if !self.building_floors.contains_key(&lb) {
+            // Steeper than this and the face is a wall, not a walkable ramp:
+            // |horizontal normal| / up-normal = tan of the slope from level.
+            const MAX_RAMP_SLOPE: f32 = 0.5;
             let mut floors: Vec<[f32; 5]> = Vec::new();
+            let mut ramps: Vec<[f32; 9]> = Vec::new();
             for (_id, _region, soup) in self.building_soup(lb) {
                 for o in (0..soup.len()).step_by(12) {
                     let ax = soup[o];
@@ -489,23 +503,31 @@ impl Scene {
                     let cx = soup[o + 6];
                     let cy = soup[o + 7];
                     let cz = soup[o + 8];
-                    let zmin = az.min(bz).min(cz);
-                    let zmax = az.max(bz).max(cz);
-                    if zmax - zmin >= 0.3 {
-                        continue;
-                    }
-                    // Normal z-component of (B-A)x(C-A); >0 faces up.
-                    let nz = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+                    // Normal of (B-A)x(C-A); nz > 0 faces up.
+                    let (nx, ny, nz) = (
+                        (by - ay) * (cz - az) - (bz - az) * (cy - ay),
+                        (bz - az) * (cx - ax) - (bx - ax) * (cz - az),
+                        (bx - ax) * (cy - ay) - (by - ay) * (cx - ax),
+                    );
                     if nz <= 0.0 {
                         continue;
                     }
-                    floors.push([
-                        zmax,
-                        ax.min(bx).min(cx),
-                        ay.min(by).min(cy),
-                        ax.max(bx).max(cx),
-                        ay.max(by).max(cy),
-                    ]);
+                    let zmin = az.min(bz).min(cz);
+                    let zmax = az.max(bz).max(cz);
+                    if zmax - zmin < 0.3 {
+                        // Near-flat up-facing: a floor plane.
+                        floors.push([
+                            zmax,
+                            ax.min(bx).min(cx),
+                            ay.min(by).min(cy),
+                            ax.max(bx).max(cx),
+                            ay.max(by).max(cy),
+                        ]);
+                    } else if (nx * nx + ny * ny).sqrt() / nz <= MAX_RAMP_SLOPE {
+                        // Walkable-sloped up-facing: a ramp face, grounded by
+                        // interpolated surface z rather than a single top.
+                        ramps.push([ax, ay, az, bx, by, bz, cx, cy, cz]);
+                    }
                 }
             }
 
@@ -527,40 +549,47 @@ impl Scene {
             // floor level), not a collision, so the richer drawing set is the
             // right source.
             const FLOOR_MIN_AREA: f32 = 1.0;
-            let add_floor_candidates = |floors: &mut Vec<[f32; 5]>, solid: &Solid| {
-                for o in (0..solid.tris.len()).step_by(9) {
-                    let ax = solid.tris[o];
-                    let ay = solid.tris[o + 1];
-                    let az = solid.tris[o + 2];
-                    let bx = solid.tris[o + 3];
-                    let by = solid.tris[o + 4];
-                    let bz = solid.tris[o + 5];
-                    let cx = solid.tris[o + 6];
-                    let cy = solid.tris[o + 7];
-                    let cz = solid.tris[o + 8];
-                    let zmin = az.min(bz).min(cz);
-                    let zmax = az.max(bz).max(cz);
-                    if zmax - zmin >= 0.3 {
-                        continue;
+            let add_floor_candidates =
+                |floors: &mut Vec<[f32; 5]>, ramps: &mut Vec<[f32; 9]>, solid: &Solid| {
+                    for o in (0..solid.tris.len()).step_by(9) {
+                        let ax = solid.tris[o];
+                        let ay = solid.tris[o + 1];
+                        let az = solid.tris[o + 2];
+                        let bx = solid.tris[o + 3];
+                        let by = solid.tris[o + 4];
+                        let bz = solid.tris[o + 5];
+                        let cx = solid.tris[o + 6];
+                        let cy = solid.tris[o + 7];
+                        let cz = solid.tris[o + 8];
+                        let (nx, ny, nz) = (
+                            (by - ay) * (cz - az) - (bz - az) * (cy - ay),
+                            (bz - az) * (cx - ax) - (bx - ax) * (cz - az),
+                            (bx - ax) * (cy - ay) - (by - ay) * (cx - ax),
+                        );
+                        if nz <= 0.0 {
+                            continue;
+                        }
+                        let zmin = az.min(bz).min(cz);
+                        let zmax = az.max(bz).max(cz);
+                        let xmin = ax.min(bx).min(cx);
+                        let xmax = ax.max(bx).max(cx);
+                        let ymin = ay.min(by).min(cy);
+                        let ymax = ay.max(by).max(cy);
+                        if (xmax - xmin) * (ymax - ymin) < FLOOR_MIN_AREA {
+                            continue;
+                        }
+                        if zmax - zmin < 0.3 {
+                            floors.push([zmax, xmin, ymin, xmax, ymax]);
+                        } else if (nx * nx + ny * ny).sqrt() / nz <= MAX_RAMP_SLOPE {
+                            ramps.push([ax, ay, az, bx, by, bz, cx, cy, cz]);
+                        }
                     }
-                    let nz = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-                    if nz <= 0.0 {
-                        continue;
-                    }
-                    let xmin = ax.min(bx).min(cx);
-                    let xmax = ax.max(bx).max(cx);
-                    let ymin = ay.min(by).min(cy);
-                    let ymax = ay.max(by).max(cy);
-                    if (xmax - xmin) * (ymax - ymin) < FLOOR_MIN_AREA {
-                        continue;
-                    }
-                    floors.push([zmax, xmin, ymin, xmax, ymax]);
-                }
-            };
+                };
             for solid in self.env_statics(lb).into_iter().chain(self.env_room(lb)) {
-                add_floor_candidates(&mut floors, &solid);
+                add_floor_candidates(&mut floors, &mut ramps, &solid);
             }
             self.building_floors.insert(lb, floors);
+            self.building_ramps.insert(lb, ramps);
         }
         let mut best: Option<f32> = None;
         if let Some(floors) = self.building_floors.get(&lb) {
@@ -589,7 +618,56 @@ impl Scene {
                 }
             }
         }
+        // A ramp grounds the foot by the surface z interpolated at the foot
+        // (not a single top): the foot rides the slope, so the knee ray stays
+        // on the up side of the ramp face and clears it. Same band guard as a
+        // floor — a foot a full storey below is never in the band, so it
+        // never snaps up onto a ramp above.
+        if let Some(ramps) = self.building_ramps.get(&lb) {
+            for r in ramps {
+                for dx in [0.0f32, BLOCK_LEN, -BLOCK_LEN] {
+                    for dy in [0.0f32, BLOCK_LEN, -BLOCK_LEN] {
+                        if let Some(zs) = Self::tri_z_at(r, gx - dx, gy - dy) {
+                            let dz = zs - terrain_z;
+                            if dz >= -0.5 && dz <= 0.5 {
+                                best = Some(best.map_or(zs, |b| b.max(zs)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         best
+    }
+
+    /// The z of a 3-vertex triangle interpolated at block-local `(px, py)` in
+    /// the XY plane, or `None` when the point is outside the triangle's XY
+    /// projection (a ramp face is only a floor where it actually covers the
+    /// foot) or the triangle is degenerate (collinear in XY, no plane).
+    fn tri_z_at(tri: &[f32; 9], px: f32, py: f32) -> Option<f32> {
+        let (ax, ay, az) = (tri[0], tri[1], tri[2]);
+        let (bx, by, bz) = (tri[3], tri[4], tri[5]);
+        let (cx, cy, cz) = (tri[6], tri[7], tri[8]);
+        let (v0x, v0y) = (bx - ax, by - ay);
+        let (v1x, v1y) = (cx - ax, cy - ay);
+        let (v2x, v2y) = (px - ax, py - ay);
+        let d00 = v0x * v0x + v0y * v0y;
+        let d01 = v0x * v1x + v0y * v1y;
+        let d11 = v1x * v1x + v1y * v1y;
+        let d20 = v2x * v0x + v2y * v0y;
+        let d21 = v2x * v1x + v2y * v1y;
+        let denom = d00 * d11 - d01 * d01;
+        if denom.abs() < 1e-9 {
+            return None;
+        }
+        let v = (d20 * d11 - d21 * d01) / denom;
+        let w = (d00 * d21 - d01 * d20) / denom;
+        let u = 1.0 - v - w;
+        const EPS: f32 = 1e-4;
+        if u < -EPS || v < -EPS || w < -EPS {
+            return None;
+        }
+        Some(u * az + v * bz + w * cz)
     }
 
 
